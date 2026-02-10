@@ -1,0 +1,31 @@
+# Binary
+bin/
+inferrouter
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Production config (contains API keys)
+config.yaml
+config.yml
+config.production.yaml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Internal docs (RFCs, notes, drafts)
+internal-docs/
+
+# Go
+vendor/
