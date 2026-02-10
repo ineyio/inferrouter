@@ -17,9 +17,8 @@ func main() {
 		log.Fatal("GEMINI_API_KEY is required")
 	}
 
-	// Set up quota store with free daily limit.
+	// Quota store — NewRouter auto-initializes limits from AccountConfig.DailyFree.
 	qs := quota.NewMemoryQuotaStore()
-	qs.SetQuota("gemini-free", 1500, ir.QuotaRequests)
 
 	cfg := ir.Config{
 		DefaultModel: "gemini-2.0-flash",

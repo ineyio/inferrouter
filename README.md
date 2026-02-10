@@ -29,7 +29,6 @@ import (
 
 func main() {
     qs := quota.NewMemoryQuotaStore()
-    qs.SetQuota("gemini-free", 1500, ir.QuotaRequests)
 
     cfg := ir.Config{
         DefaultModel: "gemini-2.0-flash",
@@ -201,6 +200,54 @@ for {
     }
 }
 ```
+
+## Quota Stores
+
+The default `MemoryQuotaStore` is in-memory and doesn't survive restarts. For production, use Redis or PostgreSQL.
+
+### Redis QuotaStore
+
+```bash
+go get github.com/ineyio/inferrouter/quota/redis
+```
+
+```go
+import (
+    goredis "github.com/redis/go-redis/v9"
+    quotaredis "github.com/ineyio/inferrouter/quota/redis"
+)
+
+client := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+qs := quotaredis.New(client)
+// Optional: quotaredis.New(client, quotaredis.WithKeyPrefix("myapp:quota:"))
+
+router, _ := ir.NewRouter(cfg, providers, ir.WithQuotaStore(qs))
+```
+
+Quota state is stored in Redis hashes with atomic Lua scripts. Safe for multi-instance deployments.
+
+### PostgreSQL QuotaStore
+
+```bash
+go get github.com/ineyio/inferrouter/quota/postgres
+```
+
+```go
+import (
+    "github.com/jackc/pgx/v5/pgxpool"
+    quotapg "github.com/ineyio/inferrouter/quota/postgres"
+)
+
+pool, _ := pgxpool.New(ctx, "postgres://localhost:5432/mydb")
+qs := quotapg.New(pool)
+// Optional: quotapg.New(pool, quotapg.WithTablePrefix("myapp_"))
+
+qs.EnsureSchema(ctx) // creates tables if not exist
+
+router, _ := ir.NewRouter(cfg, providers, ir.WithQuotaStore(qs))
+```
+
+Durable quota state with transactional Reserve. Call `CleanupIdempotency(ctx, 24*time.Hour)` periodically to prune old keys.
 
 ## How It Works
 

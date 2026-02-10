@@ -22,12 +22,8 @@ func main() {
 		openaicompat.NewOpenAI(),
 	}
 
-	// Set up quota store.
+	// Quota store — NewRouter auto-initializes limits from AccountConfig.DailyFree.
 	qs := quota.NewMemoryQuotaStore()
-	qs.SetQuota("gemini-1", 1500, ir.QuotaRequests)
-	qs.SetQuota("gemini-2", 1500, ir.QuotaRequests)
-	qs.SetQuota("grok-free", 5_000_000, ir.QuotaTokens)
-	// openai-paid has no free quota — it's the paid fallback.
 
 	cfg := ir.Config{
 		AllowPaid:    true,

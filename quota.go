@@ -25,6 +25,12 @@ type Reservation struct {
 	Unit      QuotaUnit
 }
 
+// QuotaInitializer is an optional interface that QuotaStore implementations
+// can implement to support automatic initialization from config.
+type QuotaInitializer interface {
+	SetQuota(accountID string, dailyLimit int64, unit QuotaUnit)
+}
+
 // QuotaUnit defines how quota is measured.
 type QuotaUnit string
 

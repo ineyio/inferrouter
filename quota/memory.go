@@ -141,6 +141,8 @@ func (s *MemoryQuotaStore) maybeReset(aq *accountQuota) {
 		aq.Used = 0
 		aq.Reserved = 0
 		aq.ResetAt = nextMidnightUTC()
+		// Clear idempotency keys on daily reset to prevent unbounded growth.
+		clear(s.seen)
 	}
 }
 

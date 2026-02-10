@@ -15,8 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestRouter(t *testing.T, cfg ir.Config, providers []ir.Provider, qs ir.QuotaStore) *ir.Router {
+func newTestRouter(t *testing.T, cfg ir.Config, providers []ir.Provider) *ir.Router {
 	t.Helper()
+	qs := quota.NewMemoryQuotaStore()
 	r, err := ir.NewRouter(cfg, providers,
 		ir.WithQuotaStore(qs),
 		ir.WithPolicy(&policy.FreeFirstPolicy{}),
@@ -30,9 +31,6 @@ func newTestRouter(t *testing.T, cfg ir.Config, providers []ir.Provider, qs ir.Q
 func TestFreeCandidate_SelectedWhenQuotaAvailable(t *testing.T) {
 	mockProv := mock.New(mock.WithModels("test-model"))
 
-	qs := quota.NewMemoryQuotaStore()
-	qs.SetQuota("free-1", 1000, ir.QuotaTokens)
-
 	cfg := ir.Config{
 		DefaultModel: "test-model",
 		Accounts: []ir.AccountConfig{
@@ -40,7 +38,7 @@ func TestFreeCandidate_SelectedWhenQuotaAvailable(t *testing.T) {
 		},
 	}
 
-	r := newTestRouter(t, cfg, []ir.Provider{mockProv}, qs)
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
 
 	resp, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
 		Messages: []ir.Message{{Role: "user", Content: "hello"}},
@@ -55,19 +53,15 @@ func TestFreeCandidate_SelectedWhenQuotaAvailable(t *testing.T) {
 func TestFallback_ToNextFreeOnQuotaExceeded(t *testing.T) {
 	mockProv := mock.New(mock.WithModels("test-model"))
 
-	qs := quota.NewMemoryQuotaStore()
-	qs.SetQuota("free-1", 1, ir.QuotaTokens)   // almost exhausted
-	qs.SetQuota("free-2", 1000, ir.QuotaTokens) // plenty
-
 	cfg := ir.Config{
 		DefaultModel: "test-model",
 		Accounts: []ir.AccountConfig{
-			{Provider: "mock", ID: "free-1", DailyFree: 1, QuotaUnit: ir.QuotaTokens},
-			{Provider: "mock", ID: "free-2", DailyFree: 1000, QuotaUnit: ir.QuotaTokens},
+			{Provider: "mock", ID: "free-1", DailyFree: 1, QuotaUnit: ir.QuotaTokens},    // almost exhausted
+			{Provider: "mock", ID: "free-2", DailyFree: 1000, QuotaUnit: ir.QuotaTokens}, // plenty
 		},
 	}
 
-	r := newTestRouter(t, cfg, []ir.Provider{mockProv}, qs)
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
 
 	resp, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
 		Messages: []ir.Message{{Role: "user", Content: "hello"}},
@@ -81,18 +75,16 @@ func TestFallback_ToNextFreeOnQuotaExceeded(t *testing.T) {
 func TestError_AllFreeExhausted_NoPaid(t *testing.T) {
 	mockProv := mock.New(mock.WithModels("test-model"))
 
-	qs := quota.NewMemoryQuotaStore()
-	qs.SetQuota("free-1", 0, ir.QuotaTokens)
-
 	cfg := ir.Config{
 		AllowPaid:    false,
 		DefaultModel: "test-model",
 		Accounts: []ir.AccountConfig{
-			{Provider: "mock", ID: "free-1", DailyFree: 1, QuotaUnit: ir.QuotaTokens},
+			// DailyFree=0 → no free quota, not a free candidate
+			{Provider: "mock", ID: "free-1", DailyFree: 0, QuotaUnit: ir.QuotaTokens},
 		},
 	}
 
-	r := newTestRouter(t, cfg, []ir.Provider{mockProv}, qs)
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
 
 	_, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
 		Messages: []ir.Message{{Role: "user", Content: "hello"}},
@@ -104,19 +96,16 @@ func TestError_AllFreeExhausted_NoPaid(t *testing.T) {
 func TestPaidFallback_WhenFreeExhausted(t *testing.T) {
 	mockProv := mock.New(mock.WithModels("test-model"))
 
-	qs := quota.NewMemoryQuotaStore()
-	qs.SetQuota("free-1", 0, ir.QuotaTokens) // exhausted
-
 	cfg := ir.Config{
 		AllowPaid:    true,
 		DefaultModel: "test-model",
 		Accounts: []ir.AccountConfig{
-			{Provider: "mock", ID: "free-1", DailyFree: 1, QuotaUnit: ir.QuotaTokens},
+			{Provider: "mock", ID: "free-1", DailyFree: 0, QuotaUnit: ir.QuotaTokens},
 			{Provider: "mock", ID: "paid-1", DailyFree: 0, QuotaUnit: ir.QuotaTokens, PaidEnabled: true},
 		},
 	}
 
-	r := newTestRouter(t, cfg, []ir.Provider{mockProv}, qs)
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
 
 	resp, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
 		Messages: []ir.Message{{Role: "user", Content: "hello"}},
@@ -130,9 +119,6 @@ func TestPaidFallback_WhenFreeExhausted(t *testing.T) {
 func TestReservation_PreventsRace(t *testing.T) {
 	mockProv := mock.New(mock.WithModels("test-model"))
 
-	qs := quota.NewMemoryQuotaStore()
-	qs.SetQuota("free-1", 10000, ir.QuotaTokens)
-
 	cfg := ir.Config{
 		DefaultModel: "test-model",
 		Accounts: []ir.AccountConfig{
@@ -140,7 +126,7 @@ func TestReservation_PreventsRace(t *testing.T) {
 		},
 	}
 
-	r := newTestRouter(t, cfg, []ir.Provider{mockProv}, qs)
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
 
 	var wg sync.WaitGroup
 	errs := make([]error, 20)
@@ -216,10 +202,6 @@ func TestModelAliasing_ResolvesCorrectly(t *testing.T) {
 	geminiProv := mock.New(mock.WithName("gemini"), mock.WithModels("gemini-2.0-flash"))
 	grokProv := mock.New(mock.WithName("grok"), mock.WithModels("grok-3"))
 
-	qs := quota.NewMemoryQuotaStore()
-	qs.SetQuota("gemini-1", 1000, ir.QuotaTokens)
-	qs.SetQuota("grok-1", 1000, ir.QuotaTokens)
-
 	cfg := ir.Config{
 		DefaultModel: "fast",
 		Models: []ir.ModelMapping{
@@ -237,7 +219,7 @@ func TestModelAliasing_ResolvesCorrectly(t *testing.T) {
 		},
 	}
 
-	r := newTestRouter(t, cfg, []ir.Provider{geminiProv, grokProv}, qs)
+	r := newTestRouter(t, cfg, []ir.Provider{geminiProv, grokProv})
 
 	resp, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
 		Model:    "fast",
@@ -252,9 +234,6 @@ func TestModelAliasing_ResolvesCorrectly(t *testing.T) {
 func TestStreaming_Passthrough(t *testing.T) {
 	mockProv := mock.New(mock.WithModels("test-model"))
 
-	qs := quota.NewMemoryQuotaStore()
-	qs.SetQuota("free-1", 1000, ir.QuotaTokens)
-
 	cfg := ir.Config{
 		DefaultModel: "test-model",
 		Accounts: []ir.AccountConfig{
@@ -262,7 +241,7 @@ func TestStreaming_Passthrough(t *testing.T) {
 		},
 	}
 
-	r := newTestRouter(t, cfg, []ir.Provider{mockProv}, qs)
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
 
 	stream, err := r.ChatCompletionStream(context.Background(), ir.ChatRequest{
 		Messages: []ir.Message{{Role: "user", Content: "hello"}},
@@ -295,10 +274,6 @@ func TestProviderErrorMapping(t *testing.T) {
 		mock.WithModels("test-model"),
 	)
 
-	qs := quota.NewMemoryQuotaStore()
-	qs.SetQuota("fail-1", 1000, ir.QuotaTokens)
-	qs.SetQuota("good-1", 1000, ir.QuotaTokens)
-
 	cfg := ir.Config{
 		DefaultModel: "test-model",
 		Accounts: []ir.AccountConfig{
@@ -307,7 +282,7 @@ func TestProviderErrorMapping(t *testing.T) {
 		},
 	}
 
-	r := newTestRouter(t, cfg, []ir.Provider{failProv, goodProv}, qs)
+	r := newTestRouter(t, cfg, []ir.Provider{failProv, goodProv})
 
 	resp, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
 		Messages: []ir.Message{{Role: "user", Content: "hello"}},
@@ -323,10 +298,6 @@ func TestFatalError_StopsRetrying(t *testing.T) {
 		mock.WithError(ir.ErrAuthFailed),
 	)
 
-	qs := quota.NewMemoryQuotaStore()
-	qs.SetQuota("acc-1", 1000, ir.QuotaTokens)
-	qs.SetQuota("acc-2", 1000, ir.QuotaTokens)
-
 	cfg := ir.Config{
 		DefaultModel: "test-model",
 		Accounts: []ir.AccountConfig{
@@ -335,7 +306,7 @@ func TestFatalError_StopsRetrying(t *testing.T) {
 		},
 	}
 
-	r := newTestRouter(t, cfg, []ir.Provider{failProv}, qs)
+	r := newTestRouter(t, cfg, []ir.Provider{failProv})
 
 	_, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
 		Messages: []ir.Message{{Role: "user", Content: "hello"}},
@@ -347,6 +318,38 @@ func TestFatalError_StopsRetrying(t *testing.T) {
 	var routerErr *ir.RouterError
 	assert.ErrorAs(t, err, &routerErr)
 	assert.Equal(t, 1, routerErr.Attempts)
+}
+
+// Test: Quota auto-initialization from config
+func TestQuotaAutoInit_FromConfig(t *testing.T) {
+	mockProv := mock.New(mock.WithModels("test-model"))
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "auto-1", DailyFree: 500, QuotaUnit: ir.QuotaRequests},
+		},
+	}
+
+	// Don't call SetQuota manually — NewRouter should do it.
+	qs := quota.NewMemoryQuotaStore()
+	r, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+		ir.WithQuotaStore(qs),
+		ir.WithPolicy(&policy.FreeFirstPolicy{}),
+	)
+	require.NoError(t, err)
+
+	resp, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "auto-1", resp.Routing.AccountID)
+	assert.True(t, resp.Routing.Free)
+
+	// Verify quota was consumed.
+	remaining, err := qs.Remaining(context.Background(), "auto-1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(499), remaining) // 500 - 1 request
 }
 
 // Test: EstimateTokens

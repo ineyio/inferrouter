@@ -66,15 +66,23 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 
 	// Apply defaults after options.
 	if r.policy == nil {
-		// Lazy import avoidance: define a simple inline default.
 		r.policy = &defaultFreeFirstPolicy{}
 	}
 	if r.quotaStore == nil {
-		// Will be set up by initQuota.
 		r.quotaStore = &noopQuotaStore{}
 	}
 	if r.meter == nil {
 		r.meter = &noopMeter{}
+	}
+
+	// Initialize quota limits from config if the store supports it.
+	// All accounts get a quota entry. Paid accounts without DailyFree get unlimited (no entry).
+	if init, ok := r.quotaStore.(QuotaInitializer); ok {
+		for _, acc := range cfg.Accounts {
+			if acc.DailyFree > 0 || !acc.PaidEnabled {
+				init.SetQuota(acc.ID, acc.DailyFree, acc.QuotaUnit)
+			}
+		}
 	}
 
 	return r, nil
