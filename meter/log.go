@@ -43,6 +43,7 @@ func (m *LogMeter) OnResult(e inferrouter.ResultEvent) {
 			"duration_ms", e.Duration.Milliseconds(),
 			"prompt_tokens", e.Usage.PromptTokens,
 			"completion_tokens", e.Usage.CompletionTokens,
+			"dollar_cost", e.DollarCost,
 		)
 	} else {
 		m.Logger.Warn("result_error",

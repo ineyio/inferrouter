@@ -18,7 +18,7 @@ func (p *CostFirstPolicy) Select(candidates []inferrouter.Candidate) []inferrout
 	copy(result, candidates)
 
 	sort.SliceStable(result, func(i, j int) bool {
-		return result[i].CostPerToken < result[j].CostPerToken
+		return result[i].BlendedCost() < result[j].BlendedCost()
 	})
 
 	return result

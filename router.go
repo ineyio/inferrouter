@@ -16,6 +16,7 @@ type Router struct {
 	quotaStore QuotaStore
 	meter      Meter
 	health     *HealthTracker
+	spend      *SpendTracker
 }
 
 // Option configures a Router.
@@ -41,6 +42,16 @@ func WithHealthTracker(h *HealthTracker) Option {
 	return func(r *Router) { r.health = h }
 }
 
+// WithHealthConfig sets health tracker configuration.
+func WithHealthConfig(cfg HealthConfig) Option {
+	return func(r *Router) { r.health = NewHealthTrackerWithConfig(cfg) }
+}
+
+// WithSpendTracker sets the spend tracker.
+func WithSpendTracker(s *SpendTracker) Option {
+	return func(r *Router) { r.spend = s }
+}
+
 // NewRouter creates a new Router with the given config and providers.
 // Default components (FreeFirstPolicy, MemoryQuotaStore, NoopMeter) are used
 // unless overridden via options.
@@ -54,10 +65,13 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 		provMap[p.Name()] = p
 	}
 
+	cfg.NormalizeCosts()
+
 	r := &Router{
 		cfg:       cfg,
 		providers: provMap,
 		health:    NewHealthTracker(),
+		spend:     NewSpendTracker(),
 	}
 
 	for _, opt := range opts {
@@ -97,7 +111,7 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 
 	estimatedTokens := EstimateTokens(req.Messages)
 
-	candidates, err := buildCandidates(ctx, r.cfg, r.providers, r.quotaStore, r.health, req.Model)
+	candidates, err := buildCandidates(ctx, r.cfg, r.providers, r.quotaStore, r.health, r.spend, req.Model)
 	if err != nil {
 		return ChatResponse{}, err
 	}
@@ -181,14 +195,21 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		}
 		_ = r.quotaStore.Commit(ctx, reservation, actualTokens)
 		r.health.RecordSuccess(c.AccountID)
+
+		dollarCost := calculateSpend(c, resp.Usage)
+		if dollarCost > 0 {
+			r.spend.RecordSpend(c.AccountID, dollarCost)
+		}
+
 		r.meter.OnResult(ResultEvent{
-			Provider:  c.Provider.Name(),
-			AccountID: c.AccountID,
-			Model:     c.Model,
-			Free:      c.Free,
-			Success:   true,
-			Duration:  duration,
-			Usage:     resp.Usage,
+			Provider:   c.Provider.Name(),
+			AccountID:  c.AccountID,
+			Model:      c.Model,
+			Free:       c.Free,
+			Success:    true,
+			Duration:   duration,
+			Usage:      resp.Usage,
+			DollarCost: dollarCost,
 		})
 
 		return ChatResponse{
@@ -230,7 +251,7 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 
 	estimatedTokens := EstimateTokens(req.Messages)
 
-	candidates, err := buildCandidates(ctx, r.cfg, r.providers, r.quotaStore, r.health, req.Model)
+	candidates, err := buildCandidates(ctx, r.cfg, r.providers, r.quotaStore, r.health, r.spend, req.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -302,6 +323,7 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 			quotaStore:  r.quotaStore,
 			meter:       r.meter,
 			health:      r.health,
+			spend:       r.spend,
 			candidate:   c,
 			startTime:   time.Now(),
 		}, nil

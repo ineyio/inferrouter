@@ -28,6 +28,7 @@ func buildCandidates(
 	providers map[string]Provider,
 	quotaStore QuotaStore,
 	health *HealthTracker,
+	spend *SpendTracker,
 	requestModel string,
 ) ([]Candidate, error) {
 	refs := resolveModel(cfg, requestModel)
@@ -46,15 +47,19 @@ func buildCandidates(
 			free := acc.DailyFree > 0 && remaining > 0
 
 			c := Candidate{
-				Provider:     prov,
-				AccountID:    acc.ID,
-				Auth:         acc.Auth,
-				Model:        model,
-				Free:         free,
-				Remaining:    remaining,
-				QuotaUnit:    acc.QuotaUnit,
-				Health:       health.GetHealth(acc.ID),
-				CostPerToken: acc.CostPerToken,
+				Provider:           prov,
+				AccountID:          acc.ID,
+				Auth:               acc.Auth,
+				Model:              model,
+				Free:               free,
+				Remaining:          remaining,
+				QuotaUnit:          acc.QuotaUnit,
+				Health:             health.GetHealth(acc.ID),
+				CostPerToken:       acc.CostPerToken,
+				CostPerInputToken:  acc.CostPerInputToken,
+				CostPerOutputToken: acc.CostPerOutputToken,
+				MaxDailySpend:      acc.MaxDailySpend,
+				CurrentSpend:       spend.GetSpend(acc.ID),
 			}
 			candidates = append(candidates, c)
 		}
@@ -88,7 +93,7 @@ func modelsForAccount(refs []ModelRef, acc AccountConfig, prov Provider, request
 	return nil
 }
 
-// filterCandidates removes unhealthy candidates and splits free/paid.
+// filterCandidates removes unhealthy candidates and enforces paid/spend limits.
 func filterCandidates(candidates []Candidate, allowPaid bool) []Candidate {
 	var filtered []Candidate
 	for _, c := range candidates {
@@ -96,6 +101,10 @@ func filterCandidates(candidates []Candidate, allowPaid bool) []Candidate {
 			continue
 		}
 		if !c.Free && !allowPaid {
+			continue
+		}
+		// Skip paid candidates that exceeded their daily spend limit.
+		if !c.Free && c.MaxDailySpend > 0 && c.CurrentSpend >= c.MaxDailySpend {
 			continue
 		}
 		filtered = append(filtered, c)

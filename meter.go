@@ -31,4 +31,5 @@ type ResultEvent struct {
 	Duration    time.Duration
 	Usage       Usage
 	Error       error
+	DollarCost  float64 // actual dollar cost for this request
 }

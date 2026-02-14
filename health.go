@@ -5,27 +5,44 @@ import (
 	"time"
 )
 
-const (
-	healthFailureThreshold = 3
-	healthFailureWindow    = 5 * time.Minute
-	healthUnhealthyPeriod  = 30 * time.Second
-)
+// HealthConfig configures circuit breaker behavior.
+type HealthConfig struct {
+	FailureThreshold int           // failures to trip circuit (default: 3)
+	FailureWindow    time.Duration // window for counting failures (default: 5min)
+	UnhealthyPeriod  time.Duration // cooldown before half-open (default: 30s)
+}
+
+// DefaultHealthConfig returns the default circuit breaker settings.
+func DefaultHealthConfig() HealthConfig {
+	return HealthConfig{
+		FailureThreshold: 3,
+		FailureWindow:    5 * time.Minute,
+		UnhealthyPeriod:  30 * time.Second,
+	}
+}
 
 // HealthTracker tracks per-account health using a circuit breaker pattern.
 type HealthTracker struct {
+	cfg      HealthConfig
 	mu       sync.RWMutex
 	accounts map[string]*accountHealth
 }
 
 type accountHealth struct {
-	state      HealthState
-	failures   []time.Time // sliding window of failure timestamps
-	unhealthyAt time.Time  // when state transitioned to unhealthy
+	state       HealthState
+	failures    []time.Time // sliding window of failure timestamps
+	unhealthyAt time.Time   // when state transitioned to unhealthy
 }
 
-// NewHealthTracker creates a new HealthTracker.
+// NewHealthTracker creates a new HealthTracker with default config.
 func NewHealthTracker() *HealthTracker {
+	return NewHealthTrackerWithConfig(DefaultHealthConfig())
+}
+
+// NewHealthTrackerWithConfig creates a new HealthTracker with custom config.
+func NewHealthTrackerWithConfig(cfg HealthConfig) *HealthTracker {
 	return &HealthTracker{
+		cfg:      cfg,
 		accounts: make(map[string]*accountHealth),
 	}
 }
@@ -44,7 +61,7 @@ func (h *HealthTracker) GetHealth(accountID string) HealthState {
 	defer h.mu.Unlock()
 
 	// Check if unhealthy period has elapsed → transition to half-open.
-	if ah.state == HealthUnhealthy && time.Since(ah.unhealthyAt) >= healthUnhealthyPeriod {
+	if ah.state == HealthUnhealthy && time.Since(ah.unhealthyAt) >= h.cfg.UnhealthyPeriod {
 		ah.state = HealthHalfOpen
 	}
 
@@ -74,7 +91,7 @@ func (h *HealthTracker) RecordFailure(accountID string) {
 	now := time.Now()
 
 	// Prune old failures outside the window.
-	cutoff := now.Add(-healthFailureWindow)
+	cutoff := now.Add(-h.cfg.FailureWindow)
 	valid := ah.failures[:0]
 	for _, t := range ah.failures {
 		if t.After(cutoff) {
@@ -84,7 +101,7 @@ func (h *HealthTracker) RecordFailure(accountID string) {
 	ah.failures = append(valid, now)
 
 	// Check threshold.
-	if len(ah.failures) >= healthFailureThreshold {
+	if len(ah.failures) >= h.cfg.FailureThreshold {
 		ah.state = HealthUnhealthy
 		ah.unhealthyAt = now
 	}

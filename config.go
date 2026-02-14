@@ -36,7 +36,12 @@ type AccountConfig struct {
 	QuotaUnit    QuotaUnit `yaml:"quota_unit"`
 	PaidEnabled  bool      `yaml:"paid_enabled"`
 	MaxDailySpend float64  `yaml:"max_daily_spend"`
-	CostPerToken float64   `yaml:"cost_per_token"`
+
+	// Deprecated: use CostPerInputToken and CostPerOutputToken instead.
+	CostPerToken float64 `yaml:"cost_per_token"`
+
+	CostPerInputToken  float64 `yaml:"cost_per_input_token"`
+	CostPerOutputToken float64 `yaml:"cost_per_output_token"`
 }
 
 // LoadConfig reads and parses a YAML config file.
@@ -86,6 +91,28 @@ func (c Config) Validate() error {
 		if acc.QuotaUnit != QuotaTokens && acc.QuotaUnit != QuotaRequests && acc.QuotaUnit != QuotaDollars {
 			return fmt.Errorf("inferrouter: config: account[%d] (%s): invalid quota_unit %q", i, acc.ID, acc.QuotaUnit)
 		}
+
+		if acc.DailyFree < 0 {
+			return fmt.Errorf("inferrouter: config: account[%d] (%s): daily_free must be >= 0", i, acc.ID)
+		}
+		if acc.MaxDailySpend < 0 {
+			return fmt.Errorf("inferrouter: config: account[%d] (%s): max_daily_spend must be >= 0", i, acc.ID)
+		}
+		if acc.CostPerToken < 0 {
+			return fmt.Errorf("inferrouter: config: account[%d] (%s): cost_per_token must be >= 0", i, acc.ID)
+		}
+		if acc.CostPerInputToken < 0 {
+			return fmt.Errorf("inferrouter: config: account[%d] (%s): cost_per_input_token must be >= 0", i, acc.ID)
+		}
+		if acc.CostPerOutputToken < 0 {
+			return fmt.Errorf("inferrouter: config: account[%d] (%s): cost_per_output_token must be >= 0", i, acc.ID)
+		}
+		if acc.PaidEnabled {
+			hasCost := acc.CostPerToken > 0 || acc.CostPerInputToken > 0 || acc.CostPerOutputToken > 0
+			if !hasCost {
+				return fmt.Errorf("inferrouter: config: account[%d] (%s): paid_enabled requires cost configuration", i, acc.ID)
+			}
+		}
 	}
 
 	for i, m := range c.Models {
@@ -98,4 +125,16 @@ func (c Config) Validate() error {
 	}
 
 	return nil
+}
+
+// NormalizeCosts applies backward compatibility for cost fields.
+// If CostPerToken is set and the new fields are zero, it is used for both.
+func (c *Config) NormalizeCosts() {
+	for i := range c.Accounts {
+		acc := &c.Accounts[i]
+		if acc.CostPerToken > 0 && acc.CostPerInputToken == 0 && acc.CostPerOutputToken == 0 {
+			acc.CostPerInputToken = acc.CostPerToken
+			acc.CostPerOutputToken = acc.CostPerToken
+		}
+	}
 }

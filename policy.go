@@ -17,8 +17,23 @@ type Candidate struct {
 	QuotaUnit QuotaUnit // unit of the quota
 	Health    HealthState
 
-	// CostPerToken is the cost in dollars per token for paid accounts.
+	// Deprecated: use CostPerInputToken/CostPerOutputToken.
 	CostPerToken float64
+
+	CostPerInputToken  float64
+	CostPerOutputToken float64
+
+	MaxDailySpend float64 // max daily dollar spend (0 = unlimited)
+	CurrentSpend  float64 // current daily dollar spend
+}
+
+// BlendedCost returns an estimated cost per token for sorting.
+// Assumes ~3:1 input:output ratio typical for chat.
+func (c Candidate) BlendedCost() float64 {
+	if c.CostPerInputToken > 0 || c.CostPerOutputToken > 0 {
+		return (c.CostPerInputToken + 2*c.CostPerOutputToken) / 3
+	}
+	return c.CostPerToken
 }
 
 // HealthState describes the health of a provider account.

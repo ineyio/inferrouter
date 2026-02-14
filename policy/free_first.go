@@ -31,7 +31,7 @@ func (p *FreeFirstPolicy) Select(candidates []inferrouter.Candidate) []inferrout
 		}
 
 		// Among paid: cheapest first.
-		return ci.CostPerToken < cj.CostPerToken
+		return ci.BlendedCost() < cj.BlendedCost()
 	})
 
 	return result
