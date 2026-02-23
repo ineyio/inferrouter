@@ -218,25 +218,34 @@ func mapHTTPError(resp *http.Response) error {
 		return nil
 	}
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	// Best-effort body read for diagnostics.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	resp.Body.Close()
+
+	detail := ""
+	if err == nil && len(body) > 0 {
+		detail = string(body)
+	} else {
+		detail = http.StatusText(resp.StatusCode)
+	}
 
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests:
-		return inferrouter.ErrRateLimited
+		return fmt.Errorf("%w: %s", inferrouter.ErrRateLimited, detail)
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return inferrouter.ErrAuthFailed
+		return fmt.Errorf("%w: %s", inferrouter.ErrAuthFailed, detail)
 	case http.StatusBadRequest:
-		return fmt.Errorf("%w: %s", inferrouter.ErrInvalidRequest, string(body))
+		return fmt.Errorf("%w: %s", inferrouter.ErrInvalidRequest, detail)
 	default:
-		return inferrouter.ErrProviderUnavailable
+		return fmt.Errorf("%w: HTTP %d: %s", inferrouter.ErrProviderUnavailable, resp.StatusCode, detail)
 	}
 }
 
 type geminiStream struct {
-	reader *bufio.Reader
-	body   io.ReadCloser
-	model  string
+	reader    *bufio.Reader
+	body      io.ReadCloser
+	model     string
+	parseErrs int // consecutive parse errors
 }
 
 func (s *geminiStream) Next() (inferrouter.StreamChunk, error) {
@@ -255,8 +264,13 @@ func (s *geminiStream) Next() (inferrouter.StreamChunk, error) {
 
 		var resp geminiResponse
 		if err := json.Unmarshal([]byte(data), &resp); err != nil {
+			s.parseErrs++
+			if s.parseErrs >= 3 {
+				return inferrouter.StreamChunk{}, fmt.Errorf("inferrouter: %d consecutive malformed SSE chunks: %w", s.parseErrs, err)
+			}
 			continue
 		}
+		s.parseErrs = 0
 
 		chunk := inferrouter.StreamChunk{
 			Model: s.model,

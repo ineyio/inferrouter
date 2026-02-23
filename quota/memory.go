@@ -10,11 +10,14 @@ import (
 	"github.com/ineyio/inferrouter"
 )
 
+// idemTTL is how long idempotency keys are retained before cleanup.
+const idemTTL = 1 * time.Hour
+
 // MemoryQuotaStore is an in-memory QuotaStore with daily reset.
 type MemoryQuotaStore struct {
 	mu       sync.RWMutex
 	accounts map[string]*accountQuota
-	seen     map[string]bool // idempotency key dedup
+	seen     map[string]time.Time // idempotency key → creation time
 }
 
 type accountQuota struct {
@@ -31,7 +34,7 @@ var _ inferrouter.QuotaStore = (*MemoryQuotaStore)(nil)
 func NewMemoryQuotaStore() *MemoryQuotaStore {
 	return &MemoryQuotaStore{
 		accounts: make(map[string]*accountQuota),
-		seen:     make(map[string]bool),
+		seen:     make(map[string]time.Time),
 	}
 }
 
@@ -54,9 +57,14 @@ func (s *MemoryQuotaStore) Reserve(_ context.Context, accountID string, amount i
 	defer s.mu.Unlock()
 
 	// Idempotency check.
-	if idempotencyKey != "" && s.seen[idempotencyKey] {
-		return inferrouter.Reservation{}, fmt.Errorf("inferrouter: duplicate idempotency key %q", idempotencyKey)
+	if idempotencyKey != "" {
+		if _, dup := s.seen[idempotencyKey]; dup {
+			return inferrouter.Reservation{}, fmt.Errorf("inferrouter: duplicate idempotency key %q", idempotencyKey)
+		}
 	}
+
+	// Periodic cleanup of expired idempotency keys.
+	s.pruneExpiredKeys()
 
 	aq, ok := s.accounts[accountID]
 	if !ok {
@@ -79,7 +87,7 @@ func (s *MemoryQuotaStore) Reserve(_ context.Context, accountID string, amount i
 	aq.Reserved += amount
 
 	if idempotencyKey != "" {
-		s.seen[idempotencyKey] = true
+		s.seen[idempotencyKey] = time.Now()
 	}
 
 	return inferrouter.Reservation{
@@ -142,8 +150,17 @@ func (s *MemoryQuotaStore) maybeReset(aq *accountQuota) {
 		aq.Used = 0
 		aq.Reserved = 0
 		aq.ResetAt = nextMidnightUTC()
-		// Clear idempotency keys on daily reset to prevent unbounded growth.
-		clear(s.seen)
+	}
+}
+
+// pruneExpiredKeys removes idempotency keys older than idemTTL.
+// Called under write lock.
+func (s *MemoryQuotaStore) pruneExpiredKeys() {
+	cutoff := time.Now().Add(-idemTTL)
+	for k, created := range s.seen {
+		if created.Before(cutoff) {
+			delete(s.seen, k)
+		}
 	}
 }
 

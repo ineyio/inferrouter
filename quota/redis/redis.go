@@ -222,10 +222,22 @@ func (s *Store) Remaining(ctx context.Context, accountID string) (int64, error) 
 		return 0, nil
 	}
 
-	dailyLimit, _ := strconv.ParseInt(vals[0].(string), 10, 64)
-	used, _ := strconv.ParseInt(vals[1].(string), 10, 64)
-	reserved, _ := strconv.ParseInt(vals[2].(string), 10, 64)
-	resetAt, _ := strconv.ParseInt(vals[3].(string), 10, 64)
+	dailyLimit, err := strconv.ParseInt(vals[0].(string), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("inferrouter/redis: parse daily_limit: %w", err)
+	}
+	used, err := strconv.ParseInt(vals[1].(string), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("inferrouter/redis: parse used: %w", err)
+	}
+	reserved, err := strconv.ParseInt(vals[2].(string), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("inferrouter/redis: parse reserved: %w", err)
+	}
+	resetAt, err := strconv.ParseInt(vals[3].(string), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("inferrouter/redis: parse reset_at: %w", err)
+	}
 
 	// Lazy reset check (read-only, don't write).
 	now := time.Now().UTC().Unix()

@@ -49,16 +49,13 @@ func NewHealthTrackerWithConfig(cfg HealthConfig) *HealthTracker {
 
 // GetHealth returns the current health state for an account.
 func (h *HealthTracker) GetHealth(accountID string) HealthState {
-	h.mu.RLock()
-	ah, ok := h.accounts[accountID]
-	h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
+	ah, ok := h.accounts[accountID]
 	if !ok {
 		return HealthHealthy
 	}
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
 
 	// Check if unhealthy period has elapsed → transition to half-open.
 	if ah.state == HealthUnhealthy && time.Since(ah.unhealthyAt) >= h.cfg.UnhealthyPeriod {
