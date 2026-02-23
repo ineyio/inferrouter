@@ -721,6 +721,117 @@ func TestStream_QuotaCommitError_Reported(t *testing.T) {
 	assert.Contains(t, spy.lastResult.Error.Error(), "quota operation failed")
 }
 
+// --- Bug fix tests ---
+
+// Test: ErrAllFailed includes per-candidate errors
+func TestAllFailed_IncludesTriedCandidates(t *testing.T) {
+	failProv1 := mock.New(
+		mock.WithName("prov1"),
+		mock.WithModels("test-model"),
+		mock.WithError(ir.ErrRateLimited),
+	)
+	failProv2 := mock.New(
+		mock.WithName("prov2"),
+		mock.WithModels("test-model"),
+		mock.WithError(ir.ErrProviderUnavailable),
+	)
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "prov1", ID: "acc-1", DailyFree: 1000, QuotaUnit: ir.QuotaTokens},
+			{Provider: "prov2", ID: "acc-2", DailyFree: 1000, QuotaUnit: ir.QuotaTokens},
+		},
+	}
+
+	r := newTestRouter(t, cfg, []ir.Provider{failProv1, failProv2})
+
+	_, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello"}},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ir.ErrAllFailed)
+
+	var routerErr *ir.RouterError
+	require.ErrorAs(t, err, &routerErr)
+	assert.Equal(t, 2, routerErr.Attempts)
+	assert.Len(t, routerErr.Tried, 2)
+
+	// Verify per-candidate error details.
+	assert.Equal(t, "prov1", routerErr.Tried[0].Provider)
+	assert.Equal(t, "acc-1", routerErr.Tried[0].AccountID)
+	assert.ErrorIs(t, routerErr.Tried[0].Err, ir.ErrRateLimited)
+
+	assert.Equal(t, "prov2", routerErr.Tried[1].Provider)
+	assert.Equal(t, "acc-2", routerErr.Tried[1].AccountID)
+	assert.ErrorIs(t, routerErr.Tried[1].Err, ir.ErrProviderUnavailable)
+
+	// Error string should contain provider info.
+	assert.Contains(t, err.Error(), "prov1")
+	assert.Contains(t, err.Error(), "prov2")
+	assert.Contains(t, err.Error(), "acc-1")
+	assert.Contains(t, err.Error(), "acc-2")
+}
+
+// Test: ErrAllFailed includes quota reserve failures
+func TestAllFailed_IncludesQuotaErrors(t *testing.T) {
+	mockProv := mock.New(mock.WithModels("test-model"))
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "acc-1", DailyFree: 1, QuotaUnit: ir.QuotaTokens}, // too little quota
+		},
+	}
+
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
+
+	_, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello"}},
+	})
+	require.Error(t, err)
+
+	var routerErr *ir.RouterError
+	require.ErrorAs(t, err, &routerErr)
+	assert.Len(t, routerErr.Tried, 1)
+	assert.Equal(t, "acc-1", routerErr.Tried[0].AccountID)
+}
+
+// Test: HealthTracker.Reset clears all state
+func TestHealthTracker_Reset(t *testing.T) {
+	ht := ir.NewHealthTracker()
+
+	// Trip circuit breakers.
+	for i := 0; i < 3; i++ {
+		ht.RecordFailure("acc-1")
+		ht.RecordFailure("acc-2")
+	}
+	assert.Equal(t, ir.HealthUnhealthy, ht.GetHealth("acc-1"))
+	assert.Equal(t, ir.HealthUnhealthy, ht.GetHealth("acc-2"))
+
+	// Reset all.
+	ht.Reset()
+	assert.Equal(t, ir.HealthHealthy, ht.GetHealth("acc-1"))
+	assert.Equal(t, ir.HealthHealthy, ht.GetHealth("acc-2"))
+}
+
+// Test: HealthTracker.ResetAccount clears single account
+func TestHealthTracker_ResetAccount(t *testing.T) {
+	ht := ir.NewHealthTracker()
+
+	for i := 0; i < 3; i++ {
+		ht.RecordFailure("acc-1")
+		ht.RecordFailure("acc-2")
+	}
+	assert.Equal(t, ir.HealthUnhealthy, ht.GetHealth("acc-1"))
+	assert.Equal(t, ir.HealthUnhealthy, ht.GetHealth("acc-2"))
+
+	// Reset only acc-1.
+	ht.ResetAccount("acc-1")
+	assert.Equal(t, ir.HealthHealthy, ht.GetHealth("acc-1"))
+	assert.Equal(t, ir.HealthUnhealthy, ht.GetHealth("acc-2"))
+}
+
 // --- Test helpers ---
 
 type meterSpy struct {

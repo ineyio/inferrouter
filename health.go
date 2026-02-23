@@ -107,6 +107,20 @@ func (h *HealthTracker) RecordFailure(accountID string) {
 	}
 }
 
+// Reset clears health state for all accounts, returning them to healthy.
+func (h *HealthTracker) Reset() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.accounts = make(map[string]*accountHealth)
+}
+
+// ResetAccount clears health state for a single account.
+func (h *HealthTracker) ResetAccount(accountID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.accounts, accountID)
+}
+
 func (h *HealthTracker) getOrCreate(accountID string) *accountHealth {
 	ah, ok := h.accounts[accountID]
 	if !ok {

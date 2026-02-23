@@ -123,7 +123,7 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 
 	ordered := r.policy.Select(candidates)
 
-	var lastErr error
+	var tried []CandidateError
 	for attempt, c := range ordered {
 		idempotencyKey := uuid.New().String()
 
@@ -134,7 +134,12 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 
 		reservation, err := r.quotaStore.Reserve(ctx, c.AccountID, reserveAmount, c.QuotaUnit, idempotencyKey)
 		if err != nil {
-			lastErr = err
+			tried = append(tried, CandidateError{
+				Provider:  c.Provider.Name(),
+				AccountID: c.AccountID,
+				Model:     c.Model,
+				Err:       err,
+			})
 			continue
 		}
 
@@ -184,7 +189,12 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 				}
 			}
 
-			lastErr = err
+			tried = append(tried, CandidateError{
+				Provider:  c.Provider.Name(),
+				AccountID: c.AccountID,
+				Model:     c.Model,
+				Err:       err,
+			})
 			continue
 		}
 
@@ -233,10 +243,11 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		}, nil
 	}
 
-	if lastErr != nil {
+	if len(tried) > 0 {
 		return ChatResponse{}, &RouterError{
 			Err:      ErrAllFailed,
 			Attempts: len(ordered),
+			Tried:    tried,
 		}
 	}
 	return ChatResponse{}, ErrNoCandidates
@@ -263,7 +274,7 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 
 	ordered := r.policy.Select(candidates)
 
-	var lastErr error
+	var triedStream []CandidateError
 	for attempt, c := range ordered {
 		idempotencyKey := uuid.New().String()
 
@@ -274,7 +285,12 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 
 		reservation, err := r.quotaStore.Reserve(ctx, c.AccountID, reserveAmount, c.QuotaUnit, idempotencyKey)
 		if err != nil {
-			lastErr = err
+			triedStream = append(triedStream, CandidateError{
+				Provider:  c.Provider.Name(),
+				AccountID: c.AccountID,
+				Model:     c.Model,
+				Err:       err,
+			})
 			continue
 		}
 
@@ -313,7 +329,12 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 				}
 			}
 
-			lastErr = err
+			triedStream = append(triedStream, CandidateError{
+				Provider:  c.Provider.Name(),
+				AccountID: c.AccountID,
+				Model:     c.Model,
+				Err:       err,
+			})
 			continue
 		}
 
@@ -329,10 +350,11 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 		}, nil
 	}
 
-	if lastErr != nil {
+	if len(triedStream) > 0 {
 		return nil, &RouterError{
 			Err:      ErrAllFailed,
 			Attempts: len(ordered),
+			Tried:    triedStream,
 		}
 	}
 	return nil, ErrNoCandidates
