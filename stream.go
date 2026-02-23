@@ -75,9 +75,17 @@ func (s *RouterStream) Close() error {
 		}
 	}
 
-	resultErr := s.streamErr
-	if quotaErr != nil && (resultErr == nil || errors.Is(resultErr, io.EOF)) {
+	// Build the error to return to caller.
+	// EOF is normal end-of-stream, not a caller-visible error.
+	var resultErr error
+	if !isSuccess {
+		resultErr = s.streamErr
+	}
+	if quotaErr != nil {
 		resultErr = fmt.Errorf("quota operation failed: %w", quotaErr)
+	}
+	if err != nil && resultErr == nil {
+		resultErr = fmt.Errorf("stream close: %w", err)
 	}
 
 	s.meter.OnResult(ResultEvent{
@@ -92,5 +100,5 @@ func (s *RouterStream) Close() error {
 		DollarCost: dollarCost,
 	})
 
-	return err
+	return resultErr
 }

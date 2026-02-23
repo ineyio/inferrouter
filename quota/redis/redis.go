@@ -242,30 +242,38 @@ func (s *Store) Remaining(ctx context.Context, accountID string) (int64, error) 
 }
 
 // SetQuota configures the daily quota for an account.
-func (s *Store) SetQuota(accountID string, dailyLimit int64, unit inferrouter.QuotaUnit) {
+func (s *Store) SetQuota(accountID string, dailyLimit int64, unit inferrouter.QuotaUnit) error {
 	ctx := context.Background()
 	key := s.accountKey(accountID)
 	now := time.Now().UTC()
 	nextMidnight := nextMidnightUTC(now)
 
 	// Only set if not already existing (preserve current used/reserved).
-	// Use HSETNX for daily_limit to avoid resetting an active account.
-	exists, _ := s.client.Exists(ctx, key).Result()
+	exists, err := s.client.Exists(ctx, key).Result()
+	if err != nil {
+		return fmt.Errorf("inferrouter/redis: set_quota exists check: %w", err)
+	}
+
 	if exists == 0 {
-		s.client.HSet(ctx, key,
+		if err := s.client.HSet(ctx, key,
 			"daily_limit", dailyLimit,
 			"used", 0,
 			"reserved", 0,
 			"unit", string(unit),
 			"reset_at", nextMidnight.Unix(),
-		)
+		).Err(); err != nil {
+			return fmt.Errorf("inferrouter/redis: set_quota create: %w", err)
+		}
 	} else {
 		// Update limit and unit, preserve used/reserved.
-		s.client.HSet(ctx, key,
+		if err := s.client.HSet(ctx, key,
 			"daily_limit", dailyLimit,
 			"unit", string(unit),
-		)
+		).Err(); err != nil {
+			return fmt.Errorf("inferrouter/redis: set_quota update: %w", err)
+		}
 	}
+	return nil
 }
 
 func nextMidnightUTC(now time.Time) time.Time {

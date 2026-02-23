@@ -94,7 +94,9 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 	if init, ok := r.quotaStore.(QuotaInitializer); ok {
 		for _, acc := range cfg.Accounts {
 			if acc.DailyFree > 0 || !acc.PaidEnabled {
-				init.SetQuota(acc.ID, acc.DailyFree, acc.QuotaUnit)
+				if err := init.SetQuota(acc.ID, acc.DailyFree, acc.QuotaUnit); err != nil {
+					return nil, fmt.Errorf("inferrouter: init quota for %q: %w", acc.ID, err)
+				}
 			}
 		}
 	}
@@ -167,8 +169,14 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		duration := time.Since(start)
 
 		if err != nil {
-			_ = r.quotaStore.Rollback(ctx, reservation)
+			rollbackErr := r.quotaStore.Rollback(ctx, reservation)
 			r.health.RecordFailure(c.AccountID)
+
+			resultErr := err
+			if rollbackErr != nil {
+				resultErr = fmt.Errorf("%w (rollback failed: %v)", err, rollbackErr)
+			}
+
 			r.meter.OnResult(ResultEvent{
 				Provider:  c.Provider.Name(),
 				AccountID: c.AccountID,
@@ -176,7 +184,7 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 				Free:      c.Free,
 				Success:   false,
 				Duration:  duration,
-				Error:     err,
+				Error:     resultErr,
 			})
 
 			if IsFatal(err) {
@@ -203,7 +211,7 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		if c.QuotaUnit == QuotaRequests {
 			actualTokens = 1
 		}
-		_ = r.quotaStore.Commit(ctx, reservation, actualTokens)
+		commitErr := r.quotaStore.Commit(ctx, reservation, actualTokens)
 		r.health.RecordSuccess(c.AccountID)
 
 		dollarCost := calculateSpend(c, resp.Usage)
@@ -211,14 +219,20 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 			r.spend.RecordSpend(c.AccountID, dollarCost)
 		}
 
+		var meterErr error
+		if commitErr != nil {
+			meterErr = fmt.Errorf("quota commit failed: %w", commitErr)
+		}
+
 		r.meter.OnResult(ResultEvent{
 			Provider:   c.Provider.Name(),
 			AccountID:  c.AccountID,
 			Model:      c.Model,
 			Free:       c.Free,
-			Success:    true,
+			Success:    commitErr == nil,
 			Duration:   duration,
 			Usage:      resp.Usage,
+			Error:      meterErr,
 			DollarCost: dollarCost,
 		})
 
@@ -316,7 +330,15 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 
 		stream, err := c.Provider.ChatCompletionStream(ctx, provReq)
 		if err != nil {
-			_ = r.quotaStore.Rollback(ctx, reservation)
+			if rollbackErr := r.quotaStore.Rollback(ctx, reservation); rollbackErr != nil {
+				r.meter.OnResult(ResultEvent{
+					Provider:  c.Provider.Name(),
+					AccountID: c.AccountID,
+					Model:     c.Model,
+					Free:      c.Free,
+					Error:     fmt.Errorf("rollback failed: %w", rollbackErr),
+				})
+			}
 			r.health.RecordFailure(c.AccountID)
 
 			if IsFatal(err) {

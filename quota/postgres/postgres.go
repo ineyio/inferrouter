@@ -220,16 +220,20 @@ func (s *Store) Remaining(ctx context.Context, accountID string) (int64, error) 
 }
 
 // SetQuota configures the daily quota for an account (upsert).
-func (s *Store) SetQuota(accountID string, dailyLimit int64, unit inferrouter.QuotaUnit) {
+func (s *Store) SetQuota(accountID string, dailyLimit int64, unit inferrouter.QuotaUnit) error {
 	ctx := context.Background()
 	nextMidnight := nextMidnightUTC(time.Now().UTC())
-	_, _ = s.pool.Exec(ctx,
+	_, err := s.pool.Exec(ctx,
 		fmt.Sprintf(`INSERT INTO %s (account_id, daily_limit, unit, reset_at)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (account_id) DO UPDATE SET daily_limit = $2, unit = $3`,
 			s.quotasTable()),
 		accountID, dailyLimit, string(unit), nextMidnight,
 	)
+	if err != nil {
+		return fmt.Errorf("inferrouter/postgres: set_quota: %w", err)
+	}
+	return nil
 }
 
 // CleanupIdempotency removes expired idempotency keys.

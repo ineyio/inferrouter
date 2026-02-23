@@ -43,8 +43,10 @@ func buildCandidates(
 		models := modelsForAccount(refs, acc, prov, requestModel, cfg)
 
 		for _, model := range models {
-			remaining, _ := quotaStore.Remaining(ctx, acc.ID)
-			free := acc.DailyFree > 0 && remaining > 0
+			remaining, remainErr := quotaStore.Remaining(ctx, acc.ID)
+			// Fail-open: if we can't check remaining quota, assume free if configured.
+			// Reserve() will enforce the actual limit.
+			free := acc.DailyFree > 0 && (remaining > 0 || remainErr != nil)
 
 			c := Candidate{
 				Provider:           prov,

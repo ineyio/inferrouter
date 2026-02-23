@@ -832,6 +832,156 @@ func TestHealthTracker_ResetAccount(t *testing.T) {
 	assert.Equal(t, ir.HealthUnhealthy, ht.GetHealth("acc-2"))
 }
 
+// --- Fix #1: Stream Close returns quota error, not body error ---
+
+func TestStream_Close_ReturnsQuotaError(t *testing.T) {
+	mockProv := mock.New(mock.WithModels("test-model"))
+	failQS := &failingCommitQuotaStore{}
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "free-1", DailyFree: 1000, QuotaUnit: ir.QuotaTokens},
+		},
+	}
+
+	r, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+		ir.WithQuotaStore(failQS),
+	)
+	require.NoError(t, err)
+
+	stream, err := r.ChatCompletionStream(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+
+	// Drain the stream.
+	for {
+		_, err := stream.Next()
+		if err != nil {
+			break
+		}
+	}
+
+	// Close should return quota error, not nil.
+	closeErr := stream.Close()
+	require.Error(t, closeErr)
+	assert.Contains(t, closeErr.Error(), "quota operation failed")
+}
+
+// --- Fix #2: Commit/Rollback errors reported through Meter ---
+
+func TestCommitError_ReportedViaMeter(t *testing.T) {
+	mockProv := mock.New(mock.WithModels("test-model"))
+	spy := &meterSpy{}
+	failQS := &failingCommitQuotaStore{}
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "free-1", DailyFree: 1000, QuotaUnit: ir.QuotaTokens},
+		},
+	}
+
+	r, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+		ir.WithQuotaStore(failQS),
+		ir.WithMeter(spy),
+	)
+	require.NoError(t, err)
+
+	// ChatCompletion succeeds at provider level but commit fails.
+	_, err = r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello"}},
+	})
+	// Response is still returned to caller (provider succeeded).
+	require.NoError(t, err)
+
+	// But meter should report the commit failure.
+	assert.False(t, spy.lastResult.Success)
+	require.NotNil(t, spy.lastResult.Error)
+	assert.Contains(t, spy.lastResult.Error.Error(), "quota commit failed")
+}
+
+func TestRollbackError_ReportedViaMeter(t *testing.T) {
+	failProv := mock.New(
+		mock.WithModels("test-model"),
+		mock.WithError(ir.ErrRateLimited),
+	)
+	spy := &meterSpy{}
+	failRollbackQS := &failingRollbackQuotaStore{}
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "free-1", DailyFree: 1000, QuotaUnit: ir.QuotaTokens},
+		},
+	}
+
+	r, err := ir.NewRouter(cfg, []ir.Provider{failProv},
+		ir.WithQuotaStore(failRollbackQS),
+		ir.WithMeter(spy),
+	)
+	require.NoError(t, err)
+
+	_, err = r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello"}},
+	})
+	require.Error(t, err)
+
+	// Meter should report rollback failure in the error.
+	assert.False(t, spy.lastResult.Success)
+	require.NotNil(t, spy.lastResult.Error)
+	assert.Contains(t, spy.lastResult.Error.Error(), "rollback failed")
+}
+
+// --- Fix #3: Remaining() fail-open for free tier ---
+
+func TestRemainingError_FailOpen_FreeTier(t *testing.T) {
+	mockProv := mock.New(mock.WithModels("test-model"))
+	failRemainQS := &failingRemainingQuotaStore{}
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "free-1", DailyFree: 1000, QuotaUnit: ir.QuotaTokens},
+		},
+	}
+
+	r, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+		ir.WithQuotaStore(failRemainQS),
+	)
+	require.NoError(t, err)
+
+	// Even though Remaining() fails, the account should still be tried (fail-open).
+	resp, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "free-1", resp.Routing.AccountID)
+	assert.True(t, resp.Routing.Free)
+}
+
+// --- Fix #4/#5: SetQuota error propagation ---
+
+func TestNewRouter_SetQuotaError_Propagated(t *testing.T) {
+	mockProv := mock.New(mock.WithModels("test-model"))
+	failInitQS := &failingSetQuotaStore{}
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "free-1", DailyFree: 1000, QuotaUnit: ir.QuotaTokens},
+		},
+	}
+
+	_, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+		ir.WithQuotaStore(failInitQS),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "init quota")
+	assert.Contains(t, err.Error(), "free-1")
+}
+
 // --- Test helpers ---
 
 type meterSpy struct {
@@ -853,4 +1003,44 @@ func (f *failingCommitQuotaStore) Commit(context.Context, ir.Reservation, int64)
 func (f *failingCommitQuotaStore) Rollback(context.Context, ir.Reservation) error { return nil }
 func (f *failingCommitQuotaStore) Remaining(context.Context, string) (int64, error) {
 	return 1000, nil
+}
+
+type failingRollbackQuotaStore struct{}
+
+func (f *failingRollbackQuotaStore) Reserve(_ context.Context, accountID string, amount int64, unit ir.QuotaUnit, _ string) (ir.Reservation, error) {
+	return ir.Reservation{ID: "test", AccountID: accountID, Amount: amount, Unit: unit}, nil
+}
+func (f *failingRollbackQuotaStore) Commit(context.Context, ir.Reservation, int64) error {
+	return nil
+}
+func (f *failingRollbackQuotaStore) Rollback(context.Context, ir.Reservation) error {
+	return errors.New("rollback failed")
+}
+func (f *failingRollbackQuotaStore) Remaining(context.Context, string) (int64, error) {
+	return 1000, nil
+}
+
+type failingRemainingQuotaStore struct{}
+
+func (f *failingRemainingQuotaStore) Reserve(_ context.Context, accountID string, amount int64, unit ir.QuotaUnit, _ string) (ir.Reservation, error) {
+	return ir.Reservation{ID: "test", AccountID: accountID, Amount: amount, Unit: unit}, nil
+}
+func (f *failingRemainingQuotaStore) Commit(context.Context, ir.Reservation, int64) error {
+	return nil
+}
+func (f *failingRemainingQuotaStore) Rollback(context.Context, ir.Reservation) error { return nil }
+func (f *failingRemainingQuotaStore) Remaining(context.Context, string) (int64, error) {
+	return 0, errors.New("redis timeout")
+}
+
+type failingSetQuotaStore struct{}
+
+func (f *failingSetQuotaStore) Reserve(_ context.Context, accountID string, amount int64, unit ir.QuotaUnit, _ string) (ir.Reservation, error) {
+	return ir.Reservation{ID: "test", AccountID: accountID, Amount: amount, Unit: unit}, nil
+}
+func (f *failingSetQuotaStore) Commit(context.Context, ir.Reservation, int64) error { return nil }
+func (f *failingSetQuotaStore) Rollback(context.Context, ir.Reservation) error      { return nil }
+func (f *failingSetQuotaStore) Remaining(context.Context, string) (int64, error)    { return 1000, nil }
+func (f *failingSetQuotaStore) SetQuota(string, int64, ir.QuotaUnit) error {
+	return errors.New("postgres connection refused")
 }

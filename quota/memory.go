@@ -36,7 +36,7 @@ func NewMemoryQuotaStore() *MemoryQuotaStore {
 }
 
 // SetQuota configures the daily quota for an account.
-func (s *MemoryQuotaStore) SetQuota(accountID string, dailyLimit int64, unit inferrouter.QuotaUnit) {
+func (s *MemoryQuotaStore) SetQuota(accountID string, dailyLimit int64, unit inferrouter.QuotaUnit) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -45,6 +45,7 @@ func (s *MemoryQuotaStore) SetQuota(accountID string, dailyLimit int64, unit inf
 		Unit:       unit,
 		ResetAt:    nextMidnightUTC(),
 	}
+	return nil
 }
 
 // Reserve attempts to reserve quota. Returns ErrQuotaExceeded if insufficient.
