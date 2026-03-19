@@ -42,6 +42,10 @@ type AccountConfig struct {
 
 	CostPerInputToken  float64 `yaml:"cost_per_input_token"`
 	CostPerOutputToken float64 `yaml:"cost_per_output_token"`
+
+	// RPM is the requests-per-minute limit for this account (0 = unlimited).
+	// Enforced proactively before calling the provider to avoid 429 errors.
+	RPM int `yaml:"rpm"`
 }
 
 // LoadConfig reads and parses a YAML config file.
@@ -106,6 +110,9 @@ func (c Config) Validate() error {
 		}
 		if acc.CostPerOutputToken < 0 {
 			return fmt.Errorf("inferrouter: config: account[%d] (%s): cost_per_output_token must be >= 0", i, acc.ID)
+		}
+		if acc.RPM < 0 {
+			return fmt.Errorf("inferrouter: config: account[%d] (%s): rpm must be >= 0", i, acc.ID)
 		}
 		if acc.PaidEnabled {
 			hasCost := acc.CostPerToken > 0 || acc.CostPerInputToken > 0 || acc.CostPerOutputToken > 0

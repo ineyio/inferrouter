@@ -10,13 +10,14 @@ import (
 
 // Router routes LLM requests across multiple providers and accounts.
 type Router struct {
-	cfg        Config
-	providers  map[string]Provider
-	policy     Policy
-	quotaStore QuotaStore
-	meter      Meter
-	health     *HealthTracker
-	spend      *SpendTracker
+	cfg         Config
+	providers   map[string]Provider
+	policy      Policy
+	quotaStore  QuotaStore
+	meter       Meter
+	health      *HealthTracker
+	spend       *SpendTracker
+	rateLimiter *RateLimiter
 }
 
 // Option configures a Router.
@@ -50,6 +51,11 @@ func WithHealthConfig(cfg HealthConfig) Option {
 // WithSpendTracker sets the spend tracker.
 func WithSpendTracker(s *SpendTracker) Option {
 	return func(r *Router) { r.spend = s }
+}
+
+// WithRateLimiter sets a custom rate limiter.
+func WithRateLimiter(rl *RateLimiter) Option {
+	return func(r *Router) { r.rateLimiter = rl }
 }
 
 // NewRouter creates a new Router with the given config and providers.
@@ -87,6 +93,16 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 	}
 	if r.meter == nil {
 		r.meter = &noopMeter{}
+	}
+	if r.rateLimiter == nil {
+		r.rateLimiter = NewRateLimiter()
+	}
+
+	// Initialize RPM limits from config.
+	for _, acc := range cfg.Accounts {
+		if acc.RPM > 0 {
+			r.rateLimiter.SetLimit(acc.ID, acc.RPM)
+		}
 	}
 
 	// Initialize quota limits from config if the store supports it.
@@ -127,6 +143,19 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 
 	var tried []CandidateError
 	for attempt, c := range ordered {
+		// RPM check — skip candidate if per-minute limit exceeded.
+		// This is a local enforcement, not a provider error, so we don't
+		// record a health failure.
+		if !r.rateLimiter.Allow(c.AccountID) {
+			tried = append(tried, CandidateError{
+				Provider:  c.Provider.Name(),
+				AccountID: c.AccountID,
+				Model:     c.Model,
+				Err:       ErrRPMExceeded,
+			})
+			continue
+		}
+
 		idempotencyKey := uuid.New().String()
 
 		reserveAmount := estimatedTokens
@@ -290,6 +319,16 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 
 	var triedStream []CandidateError
 	for attempt, c := range ordered {
+		if !r.rateLimiter.Allow(c.AccountID) {
+			triedStream = append(triedStream, CandidateError{
+				Provider:  c.Provider.Name(),
+				AccountID: c.AccountID,
+				Model:     c.Model,
+				Err:       ErrRPMExceeded,
+			})
+			continue
+		}
+
 		idempotencyKey := uuid.New().String()
 
 		reserveAmount := estimatedTokens

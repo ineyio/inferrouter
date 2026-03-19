@@ -16,6 +16,7 @@ var (
 	ErrProviderUnavailable = errors.New("inferrouter: provider unavailable")
 	ErrModelNotFound      = errors.New("inferrouter: model not found")
 	ErrAllFailed          = errors.New("inferrouter: all candidates failed")
+	ErrRPMExceeded        = errors.New("inferrouter: requests per minute limit exceeded")
 )
 
 // CandidateError records the error from a single candidate attempt.
@@ -70,5 +71,6 @@ func IsFatal(err error) bool {
 func IsRetryable(err error) bool {
 	return errors.Is(err, ErrRateLimited) ||
 		errors.Is(err, ErrProviderUnavailable) ||
-		errors.Is(err, ErrQuotaExceeded)
+		errors.Is(err, ErrQuotaExceeded) ||
+		errors.Is(err, ErrRPMExceeded)
 }

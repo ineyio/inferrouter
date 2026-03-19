@@ -1044,3 +1044,136 @@ func (f *failingSetQuotaStore) Remaining(context.Context, string) (int64, error)
 func (f *failingSetQuotaStore) SetQuota(string, int64, ir.QuotaUnit) error {
 	return errors.New("postgres connection refused")
 }
+
+// --- RPM Rate Limiting Tests ---
+
+func TestRPM_SkipsRateLimitedCandidate(t *testing.T) {
+	mockProv := mock.New(mock.WithModels("test-model"))
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "limited", DailyFree: 1000, QuotaUnit: ir.QuotaTokens, RPM: 1},
+			{Provider: "mock", ID: "unlimited", DailyFree: 1000, QuotaUnit: ir.QuotaTokens},
+		},
+	}
+
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
+
+	// First request uses "limited" (free-first sorts by remaining, both equal).
+	resp1, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "limited", resp1.Routing.AccountID)
+
+	// Second request — "limited" is at RPM cap, falls back to "unlimited".
+	resp2, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello again"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "unlimited", resp2.Routing.AccountID)
+}
+
+func TestRPM_AllCandidatesLimited(t *testing.T) {
+	mockProv := mock.New(mock.WithModels("test-model"))
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "acc1", DailyFree: 1000, QuotaUnit: ir.QuotaTokens, RPM: 1},
+		},
+	}
+
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
+
+	// First request succeeds.
+	_, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+
+	// Second request — all candidates RPM-limited.
+	_, err = r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello again"}},
+	})
+	require.Error(t, err)
+
+	var routerErr *ir.RouterError
+	require.True(t, errors.As(err, &routerErr))
+	require.Len(t, routerErr.Tried, 1)
+	assert.True(t, errors.Is(routerErr.Tried[0].Err, ir.ErrRPMExceeded))
+	assert.True(t, ir.IsRetryable(ir.ErrRPMExceeded))
+}
+
+func TestRPM_ZeroMeansUnlimited(t *testing.T) {
+	mockProv := mock.New(mock.WithModels("test-model"))
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "acc1", DailyFree: 10000, QuotaUnit: ir.QuotaTokens, RPM: 0},
+		},
+	}
+
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
+
+	// Send many requests — all should succeed (no RPM limit).
+	for i := 0; i < 50; i++ {
+		_, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
+			Messages: []ir.Message{{Role: "user", Content: "hello"}},
+		})
+		require.NoError(t, err)
+	}
+}
+
+func TestRPM_NegativeRejected(t *testing.T) {
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "acc1", DailyFree: 1000, QuotaUnit: ir.QuotaTokens, RPM: -1},
+		},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rpm must be >= 0")
+}
+
+func TestRPM_StreamingSameAsSync(t *testing.T) {
+	mockProv := mock.New(mock.WithModels("test-model"))
+
+	cfg := ir.Config{
+		DefaultModel: "test-model",
+		Accounts: []ir.AccountConfig{
+			{Provider: "mock", ID: "limited", DailyFree: 1000, QuotaUnit: ir.QuotaTokens, RPM: 1},
+			{Provider: "mock", ID: "unlimited", DailyFree: 1000, QuotaUnit: ir.QuotaTokens},
+		},
+	}
+
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
+
+	// First stream uses "limited".
+	stream1, err := r.ChatCompletionStream(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	// Drain and close stream.
+	for {
+		_, err := stream1.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+	}
+	stream1.Close()
+
+	// Second stream — "limited" is at RPM cap, falls back to "unlimited".
+	stream2, err := r.ChatCompletionStream(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello again"}},
+	})
+	require.NoError(t, err)
+	stream2.Close()
+}
