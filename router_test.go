@@ -564,12 +564,12 @@ func TestMaxDailySpend_Enforcement(t *testing.T) {
 		DefaultModel: "test-model",
 		Accounts: []ir.AccountConfig{
 			{
-				Provider:       "mock",
-				ID:             "paid-1",
-				PaidEnabled:    true,
-				CostPerToken:   0.001, // $0.001/token
-				MaxDailySpend:  0.01,  // $0.01/day
-				QuotaUnit:      ir.QuotaTokens,
+				Provider:      "mock",
+				ID:            "paid-1",
+				PaidEnabled:   true,
+				CostPerToken:  0.001, // $0.001/token
+				MaxDailySpend: 0.01,  // $0.01/day
+				QuotaUnit:     ir.QuotaTokens,
 			},
 		},
 	}
@@ -990,7 +990,7 @@ type meterSpy struct {
 }
 
 func (m *meterSpy) OnRoute(e ir.RouteEvent)   { m.lastRoute = e }
-func (m *meterSpy) OnResult(e ir.ResultEvent)  { m.lastResult = e }
+func (m *meterSpy) OnResult(e ir.ResultEvent) { m.lastResult = e }
 
 type failingCommitQuotaStore struct{}
 
@@ -1138,6 +1138,66 @@ func TestRPM_NegativeRejected(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rpm must be >= 0")
+}
+
+func TestRPM_ModelFallback_WhenPrimaryExhausted(t *testing.T) {
+	mockProv := mock.New(mock.WithModels("gpt-oss-120b", "qwen-3-235b"))
+
+	cfg := ir.Config{
+		// Alias "discover" tries gpt-oss-120b first, then qwen-3-235b.
+		Models: []ir.ModelMapping{{
+			Alias: "discover",
+			Models: []ir.ModelRef{
+				{Provider: "mock", Model: "gpt-oss-120b"},
+				{Provider: "mock", Model: "qwen-3-235b"},
+			},
+		}},
+		DefaultModel: "discover",
+		Accounts: []ir.AccountConfig{{
+			Provider:  "mock",
+			ID:        "cerebras-free",
+			DailyFree: 100000,
+			QuotaUnit: ir.QuotaTokens,
+			ModelLimits: map[string]ir.Limits{
+				"gpt-oss-120b": {RPM: 1},
+				"qwen-3-235b":  {RPM: 1},
+			},
+		}},
+	}
+
+	r := newTestRouter(t, cfg, []ir.Provider{mockProv})
+
+	// First request uses gpt-oss-120b (first in alias).
+	resp1, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-oss-120b", resp1.Routing.Model)
+
+	// Second request — gpt-oss-120b RPM exhausted, falls back to qwen-3-235b.
+	resp2, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Messages: []ir.Message{{Role: "user", Content: "hello again"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "qwen-3-235b", resp2.Routing.Model)
+}
+
+func TestRPM_ModelLimits_NegativeRejected(t *testing.T) {
+	cfg := ir.Config{
+		Accounts: []ir.AccountConfig{{
+			Provider:  "mock",
+			ID:        "acc1",
+			DailyFree: 1000,
+			QuotaUnit: ir.QuotaTokens,
+			ModelLimits: map[string]ir.Limits{
+				"model-a": {RPM: -1},
+			},
+		}},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "model_limits")
 }
 
 func TestRPM_StreamingSameAsSync(t *testing.T) {

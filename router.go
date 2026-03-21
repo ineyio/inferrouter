@@ -62,6 +62,10 @@ func WithRateLimiter(rl *RateLimiter) Option {
 // Default components (FreeFirstPolicy, MemoryQuotaStore, NoopMeter) are used
 // unless overridden via options.
 func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
 	if len(providers) == 0 {
 		return nil, fmt.Errorf("inferrouter: at least one provider is required")
 	}
@@ -98,15 +102,19 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 		r.rateLimiter = NewRateLimiter()
 	}
 
-	// Initialize RPM limits from config.
+	// Initialize rate limits from config.
 	for _, acc := range cfg.Accounts {
+		// Per-model limits take priority.
+		for model, limits := range acc.ModelLimits {
+			r.rateLimiter.SetModelLimits(acc.ID, model, limits)
+		}
+		// Account-level RPM as fallback for models without explicit limits.
 		if acc.RPM > 0 {
-			r.rateLimiter.SetLimit(acc.ID, acc.RPM)
+			r.rateLimiter.SetAccountDefault(acc.ID, Limits{RPM: acc.RPM})
 		}
 	}
 
 	// Initialize quota limits from config if the store supports it.
-	// All accounts get a quota entry. Paid accounts without DailyFree get unlimited (no entry).
 	if init, ok := r.quotaStore.(QuotaInitializer); ok {
 		for _, acc := range cfg.Accounts {
 			if acc.DailyFree > 0 || !acc.PaidEnabled {
@@ -120,57 +128,162 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 	return r, nil
 }
 
-// ChatCompletion performs a synchronous chat completion with automatic routing.
-func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {
-	model := req.Model
-	if model == "" {
-		model = r.cfg.DefaultModel
-	}
+// --- Domain phases of a routing request ---
 
-	estimatedTokens := EstimateTokens(req.Messages)
-
-	candidates, err := buildCandidates(ctx, r.cfg, r.providers, r.quotaStore, r.health, r.spend, req.Model)
+// prepareRoute resolves the model, builds and orders candidates.
+func (r *Router) prepareRoute(ctx context.Context, requestModel string) ([]Candidate, error) {
+	candidates, err := buildCandidates(ctx, r.cfg, r.providers, r.quotaStore, r.health, r.spend, requestModel)
 	if err != nil {
-		return ChatResponse{}, err
+		return nil, err
 	}
 
 	candidates = filterCandidates(candidates, r.cfg.AllowPaid)
 	if len(candidates) == 0 {
-		return ChatResponse{}, ErrNoCandidates
+		return nil, ErrNoCandidates
 	}
 
-	ordered := r.policy.Select(candidates)
+	return r.policy.Select(candidates), nil
+}
+
+// acquire attempts RPM check and quota reservation for a candidate.
+// Returns the reservation on success, or a CandidateError if the candidate should be skipped.
+func (r *Router) acquire(ctx context.Context, c Candidate, estimatedTokens int64) (Reservation, *CandidateError) {
+	if !r.rateLimiter.Allow(c.AccountID, c.Model) {
+		return Reservation{}, &CandidateError{
+			Provider: c.Provider.Name(), AccountID: c.AccountID, Model: c.Model,
+			Err: ErrRPMExceeded,
+		}
+	}
+
+	reserveAmount := estimatedTokens
+	if c.QuotaUnit == QuotaRequests {
+		reserveAmount = 1
+	}
+
+	reservation, err := r.quotaStore.Reserve(ctx, c.AccountID, reserveAmount, c.QuotaUnit, uuid.New().String())
+	if err != nil {
+		return Reservation{}, &CandidateError{
+			Provider: c.Provider.Name(), AccountID: c.AccountID, Model: c.Model,
+			Err: err,
+		}
+	}
+	return reservation, nil
+}
+
+// settleFailure handles rollback, health tracking, and metering after a provider error.
+// Returns a RouterError if the error is fatal (caller should return immediately),
+// or a CandidateError to append to the tried list.
+func (r *Router) settleFailure(ctx context.Context, c Candidate, reservation Reservation, providerErr error, duration time.Duration, attempt int) (*RouterError, CandidateError) {
+	rollbackErr := r.quotaStore.Rollback(ctx, reservation)
+	r.health.RecordFailure(c.AccountID)
+
+	resultErr := providerErr
+	if rollbackErr != nil {
+		resultErr = fmt.Errorf("%w (rollback failed: %v)", providerErr, rollbackErr)
+	}
+
+	r.meter.OnResult(ResultEvent{
+		Provider:  c.Provider.Name(),
+		AccountID: c.AccountID,
+		Model:     c.Model,
+		Free:      c.Free,
+		Success:   false,
+		Duration:  duration,
+		Error:     resultErr,
+	})
+
+	ce := CandidateError{
+		Provider: c.Provider.Name(), AccountID: c.AccountID, Model: c.Model,
+		Err: providerErr,
+	}
+
+	if IsFatal(providerErr) {
+		return &RouterError{
+			Err:       providerErr,
+			Provider:  c.Provider.Name(),
+			AccountID: c.AccountID,
+			Model:     c.Model,
+			Attempts:  attempt + 1,
+		}, ce
+	}
+
+	return nil, ce
+}
+
+// settleSuccess handles quota commit, health tracking, spend recording, and metering
+// after a successful provider response.
+func (r *Router) settleSuccess(ctx context.Context, c Candidate, reservation Reservation, usage Usage, duration time.Duration) {
+	actualTokens := usage.TotalTokens
+	if c.QuotaUnit == QuotaRequests {
+		actualTokens = 1
+	}
+	commitErr := r.quotaStore.Commit(ctx, reservation, actualTokens)
+	r.health.RecordSuccess(c.AccountID)
+
+	dollarCost := calculateSpend(c, usage)
+	if dollarCost > 0 {
+		r.spend.RecordSpend(c.AccountID, dollarCost)
+	}
+
+	var meterErr error
+	if commitErr != nil {
+		meterErr = fmt.Errorf("quota commit failed: %w", commitErr)
+	}
+
+	r.meter.OnResult(ResultEvent{
+		Provider:   c.Provider.Name(),
+		AccountID:  c.AccountID,
+		Model:      c.Model,
+		Free:       c.Free,
+		Success:    commitErr == nil,
+		Duration:   duration,
+		Usage:      usage,
+		Error:      meterErr,
+		DollarCost: dollarCost,
+	})
+}
+
+// buildProviderRequest creates the request to send to the provider.
+func buildProviderRequest(c Candidate, req ChatRequest, stream bool) ProviderRequest {
+	return ProviderRequest{
+		Auth:        c.Auth,
+		Model:       c.Model,
+		Messages:    req.Messages,
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+		TopP:        req.TopP,
+		Stop:        req.Stop,
+		Stream:      stream,
+	}
+}
+
+func allFailedError(tried []CandidateError, total int) error {
+	if len(tried) > 0 {
+		return &RouterError{
+			Err:      ErrAllFailed,
+			Attempts: total,
+			Tried:    tried,
+		}
+	}
+	return ErrNoCandidates
+}
+
+// --- Public API ---
+
+// ChatCompletion performs a synchronous chat completion with automatic routing.
+func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+	estimatedTokens := EstimateTokens(req.Messages)
+
+	ordered, err := r.prepareRoute(ctx, req.Model)
+	if err != nil {
+		return ChatResponse{}, err
+	}
 
 	var tried []CandidateError
 	for attempt, c := range ordered {
-		// RPM check — skip candidate if per-minute limit exceeded.
-		// This is a local enforcement, not a provider error, so we don't
-		// record a health failure.
-		if !r.rateLimiter.Allow(c.AccountID) {
-			tried = append(tried, CandidateError{
-				Provider:  c.Provider.Name(),
-				AccountID: c.AccountID,
-				Model:     c.Model,
-				Err:       ErrRPMExceeded,
-			})
-			continue
-		}
-
-		idempotencyKey := uuid.New().String()
-
-		reserveAmount := estimatedTokens
-		if c.QuotaUnit == QuotaRequests {
-			reserveAmount = 1
-		}
-
-		reservation, err := r.quotaStore.Reserve(ctx, c.AccountID, reserveAmount, c.QuotaUnit, idempotencyKey)
-		if err != nil {
-			tried = append(tried, CandidateError{
-				Provider:  c.Provider.Name(),
-				AccountID: c.AccountID,
-				Model:     c.Model,
-				Err:       err,
-			})
+		reservation, skip := r.acquire(ctx, c, estimatedTokens)
+		if skip != nil {
+			tried = append(tried, *skip)
 			continue
 		}
 
@@ -183,98 +296,29 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 			EstimatedIn: estimatedTokens,
 		})
 
-		provReq := ProviderRequest{
-			Auth:        c.Auth,
-			Model:       c.Model,
-			Messages:    req.Messages,
-			Temperature: req.Temperature,
-			MaxTokens:   req.MaxTokens,
-			TopP:        req.TopP,
-			Stop:        req.Stop,
-		}
-
 		start := time.Now()
-		resp, err := c.Provider.ChatCompletion(ctx, provReq)
+		resp, err := c.Provider.ChatCompletion(ctx, buildProviderRequest(c, req, false))
 		duration := time.Since(start)
 
 		if err != nil {
-			rollbackErr := r.quotaStore.Rollback(ctx, reservation)
-			r.health.RecordFailure(c.AccountID)
-
-			resultErr := err
-			if rollbackErr != nil {
-				resultErr = fmt.Errorf("%w (rollback failed: %v)", err, rollbackErr)
+			fatal, ce := r.settleFailure(ctx, c, reservation, err, duration, attempt)
+			if fatal != nil {
+				return ChatResponse{}, fatal
 			}
-
-			r.meter.OnResult(ResultEvent{
-				Provider:  c.Provider.Name(),
-				AccountID: c.AccountID,
-				Model:     c.Model,
-				Free:      c.Free,
-				Success:   false,
-				Duration:  duration,
-				Error:     resultErr,
-			})
-
-			if IsFatal(err) {
-				return ChatResponse{}, &RouterError{
-					Err:       err,
-					Provider:  c.Provider.Name(),
-					AccountID: c.AccountID,
-					Model:     c.Model,
-					Attempts:  attempt + 1,
-				}
-			}
-
-			tried = append(tried, CandidateError{
-				Provider:  c.Provider.Name(),
-				AccountID: c.AccountID,
-				Model:     c.Model,
-				Err:       err,
-			})
+			tried = append(tried, ce)
 			continue
 		}
 
-		// Success.
-		actualTokens := resp.Usage.TotalTokens
-		if c.QuotaUnit == QuotaRequests {
-			actualTokens = 1
-		}
-		commitErr := r.quotaStore.Commit(ctx, reservation, actualTokens)
-		r.health.RecordSuccess(c.AccountID)
-
-		dollarCost := calculateSpend(c, resp.Usage)
-		if dollarCost > 0 {
-			r.spend.RecordSpend(c.AccountID, dollarCost)
-		}
-
-		var meterErr error
-		if commitErr != nil {
-			meterErr = fmt.Errorf("quota commit failed: %w", commitErr)
-		}
-
-		r.meter.OnResult(ResultEvent{
-			Provider:   c.Provider.Name(),
-			AccountID:  c.AccountID,
-			Model:      c.Model,
-			Free:       c.Free,
-			Success:    commitErr == nil,
-			Duration:   duration,
-			Usage:      resp.Usage,
-			Error:      meterErr,
-			DollarCost: dollarCost,
-		})
+		r.settleSuccess(ctx, c, reservation, resp.Usage, duration)
 
 		return ChatResponse{
 			ID:    resp.ID,
 			Model: resp.Model,
-			Choices: []Choice{
-				{
-					Index:        0,
-					Message:      Message{Role: "assistant", Content: resp.Content},
-					FinishReason: resp.FinishReason,
-				},
-			},
+			Choices: []Choice{{
+				Index:        0,
+				Message:      Message{Role: "assistant", Content: resp.Content},
+				FinishReason: resp.FinishReason,
+			}},
 			Usage: resp.Usage,
 			Routing: RoutingInfo{
 				Provider:  c.Provider.Name(),
@@ -286,64 +330,23 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		}, nil
 	}
 
-	if len(tried) > 0 {
-		return ChatResponse{}, &RouterError{
-			Err:      ErrAllFailed,
-			Attempts: len(ordered),
-			Tried:    tried,
-		}
-	}
-	return ChatResponse{}, ErrNoCandidates
+	return ChatResponse{}, allFailedError(tried, len(ordered))
 }
 
 // ChatCompletionStream performs a streaming chat completion with automatic routing.
 func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*RouterStream, error) {
-	model := req.Model
-	if model == "" {
-		model = r.cfg.DefaultModel
-	}
-
 	estimatedTokens := EstimateTokens(req.Messages)
 
-	candidates, err := buildCandidates(ctx, r.cfg, r.providers, r.quotaStore, r.health, r.spend, req.Model)
+	ordered, err := r.prepareRoute(ctx, req.Model)
 	if err != nil {
 		return nil, err
 	}
 
-	candidates = filterCandidates(candidates, r.cfg.AllowPaid)
-	if len(candidates) == 0 {
-		return nil, ErrNoCandidates
-	}
-
-	ordered := r.policy.Select(candidates)
-
-	var triedStream []CandidateError
+	var tried []CandidateError
 	for attempt, c := range ordered {
-		if !r.rateLimiter.Allow(c.AccountID) {
-			triedStream = append(triedStream, CandidateError{
-				Provider:  c.Provider.Name(),
-				AccountID: c.AccountID,
-				Model:     c.Model,
-				Err:       ErrRPMExceeded,
-			})
-			continue
-		}
-
-		idempotencyKey := uuid.New().String()
-
-		reserveAmount := estimatedTokens
-		if c.QuotaUnit == QuotaRequests {
-			reserveAmount = 1
-		}
-
-		reservation, err := r.quotaStore.Reserve(ctx, c.AccountID, reserveAmount, c.QuotaUnit, idempotencyKey)
-		if err != nil {
-			triedStream = append(triedStream, CandidateError{
-				Provider:  c.Provider.Name(),
-				AccountID: c.AccountID,
-				Model:     c.Model,
-				Err:       err,
-			})
+		reservation, skip := r.acquire(ctx, c, estimatedTokens)
+		if skip != nil {
+			tried = append(tried, *skip)
 			continue
 		}
 
@@ -356,46 +359,13 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 			EstimatedIn: estimatedTokens,
 		})
 
-		provReq := ProviderRequest{
-			Auth:        c.Auth,
-			Model:       c.Model,
-			Messages:    req.Messages,
-			Temperature: req.Temperature,
-			MaxTokens:   req.MaxTokens,
-			TopP:        req.TopP,
-			Stop:        req.Stop,
-			Stream:      true,
-		}
-
-		stream, err := c.Provider.ChatCompletionStream(ctx, provReq)
+		stream, err := c.Provider.ChatCompletionStream(ctx, buildProviderRequest(c, req, true))
 		if err != nil {
-			if rollbackErr := r.quotaStore.Rollback(ctx, reservation); rollbackErr != nil {
-				r.meter.OnResult(ResultEvent{
-					Provider:  c.Provider.Name(),
-					AccountID: c.AccountID,
-					Model:     c.Model,
-					Free:      c.Free,
-					Error:     fmt.Errorf("rollback failed: %w", rollbackErr),
-				})
+			fatal, ce := r.settleFailure(ctx, c, reservation, err, 0, attempt)
+			if fatal != nil {
+				return nil, fatal
 			}
-			r.health.RecordFailure(c.AccountID)
-
-			if IsFatal(err) {
-				return nil, &RouterError{
-					Err:       err,
-					Provider:  c.Provider.Name(),
-					AccountID: c.AccountID,
-					Model:     c.Model,
-					Attempts:  attempt + 1,
-				}
-			}
-
-			triedStream = append(triedStream, CandidateError{
-				Provider:  c.Provider.Name(),
-				AccountID: c.AccountID,
-				Model:     c.Model,
-				Err:       err,
-			})
+			tried = append(tried, ce)
 			continue
 		}
 
@@ -411,21 +381,13 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 		}, nil
 	}
 
-	if len(triedStream) > 0 {
-		return nil, &RouterError{
-			Err:      ErrAllFailed,
-			Attempts: len(ordered),
-			Tried:    triedStream,
-		}
-	}
-	return nil, ErrNoCandidates
+	return nil, allFailedError(tried, len(ordered))
 }
 
 // defaultFreeFirstPolicy is an inline free-first policy to avoid import cycles.
 type defaultFreeFirstPolicy struct{}
 
 func (p *defaultFreeFirstPolicy) Select(candidates []Candidate) []Candidate {
-	// Simple: free first, then paid. Within each group, preserve order.
 	var free, paid []Candidate
 	for _, c := range candidates {
 		if c.Free {
@@ -443,9 +405,9 @@ type noopQuotaStore struct{}
 func (s *noopQuotaStore) Reserve(_ context.Context, accountID string, amount int64, unit QuotaUnit, _ string) (Reservation, error) {
 	return Reservation{ID: uuid.New().String(), AccountID: accountID, Amount: amount, Unit: unit}, nil
 }
-func (s *noopQuotaStore) Commit(context.Context, Reservation, int64) error   { return nil }
-func (s *noopQuotaStore) Rollback(context.Context, Reservation) error        { return nil }
-func (s *noopQuotaStore) Remaining(context.Context, string) (int64, error)   { return 0, nil }
+func (s *noopQuotaStore) Commit(context.Context, Reservation, int64) error { return nil }
+func (s *noopQuotaStore) Rollback(context.Context, Reservation) error      { return nil }
+func (s *noopQuotaStore) Remaining(context.Context, string) (int64, error) { return 0, nil }
 
 // noopMeter is a meter that does nothing.
 type noopMeter struct{}

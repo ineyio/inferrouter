@@ -17,8 +17,8 @@ type Config struct {
 
 // ModelMapping defines a model alias.
 type ModelMapping struct {
-	Alias    string     `yaml:"alias"`
-	Models   []ModelRef `yaml:"models"`
+	Alias  string     `yaml:"alias"`
+	Models []ModelRef `yaml:"models"`
 }
 
 // ModelRef references a specific provider model.
@@ -29,13 +29,13 @@ type ModelRef struct {
 
 // AccountConfig configures a single provider account.
 type AccountConfig struct {
-	Provider     string    `yaml:"provider"`
-	ID           string    `yaml:"id"`
-	Auth         Auth      `yaml:"auth"`
-	DailyFree    int64     `yaml:"daily_free"`
-	QuotaUnit    QuotaUnit `yaml:"quota_unit"`
-	PaidEnabled  bool      `yaml:"paid_enabled"`
-	MaxDailySpend float64  `yaml:"max_daily_spend"`
+	Provider      string    `yaml:"provider"`
+	ID            string    `yaml:"id"`
+	Auth          Auth      `yaml:"auth"`
+	DailyFree     int64     `yaml:"daily_free"`
+	QuotaUnit     QuotaUnit `yaml:"quota_unit"`
+	PaidEnabled   bool      `yaml:"paid_enabled"`
+	MaxDailySpend float64   `yaml:"max_daily_spend"`
 
 	// Deprecated: use CostPerInputToken and CostPerOutputToken instead.
 	CostPerToken float64 `yaml:"cost_per_token"`
@@ -43,9 +43,14 @@ type AccountConfig struct {
 	CostPerInputToken  float64 `yaml:"cost_per_input_token"`
 	CostPerOutputToken float64 `yaml:"cost_per_output_token"`
 
-	// RPM is the requests-per-minute limit for this account (0 = unlimited).
-	// Enforced proactively before calling the provider to avoid 429 errors.
+	// RPM is the default requests-per-minute limit for this account (0 = unlimited).
+	// Applied to all models unless overridden by ModelLimits.
 	RPM int `yaml:"rpm"`
+
+	// ModelLimits configures per-model rate limits for this account.
+	// When set, each model has independent RPM/RPH/RPD budgets.
+	// Models not listed fall back to the account-level RPM.
+	ModelLimits map[string]Limits `yaml:"model_limits"`
 }
 
 // LoadConfig reads and parses a YAML config file.
@@ -113,6 +118,11 @@ func (c Config) Validate() error {
 		}
 		if acc.RPM < 0 {
 			return fmt.Errorf("inferrouter: config: account[%d] (%s): rpm must be >= 0", i, acc.ID)
+		}
+		for model, limits := range acc.ModelLimits {
+			if limits.RPM < 0 || limits.RPH < 0 || limits.RPD < 0 {
+				return fmt.Errorf("inferrouter: config: account[%d] (%s): model_limits[%s]: values must be >= 0", i, acc.ID, model)
+			}
 		}
 		if acc.PaidEnabled {
 			hasCost := acc.CostPerToken > 0 || acc.CostPerInputToken > 0 || acc.CostPerOutputToken > 0

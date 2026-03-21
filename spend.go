@@ -7,9 +7,9 @@ import (
 
 // SpendTracker tracks per-account dollar spend with daily reset.
 type SpendTracker struct {
-	mu       sync.Mutex
-	accounts map[string]*accountSpend
-	resetDay int // day of year for last reset
+	mu        sync.Mutex
+	accounts  map[string]*accountSpend
+	resetDate string // "2006-01-02" format, UTC
 }
 
 type accountSpend struct {
@@ -19,8 +19,8 @@ type accountSpend struct {
 // NewSpendTracker creates a new SpendTracker.
 func NewSpendTracker() *SpendTracker {
 	return &SpendTracker{
-		accounts: make(map[string]*accountSpend),
-		resetDay: time.Now().UTC().YearDay(),
+		accounts:  make(map[string]*accountSpend),
+		resetDate: time.Now().UTC().Format("2006-01-02"),
 	}
 }
 
@@ -53,12 +53,12 @@ func (s *SpendTracker) GetSpend(accountID string) float64 {
 	return as.amount
 }
 
-// checkReset resets all spend if day has changed. Must be called with lock held.
+// checkReset resets all spend if the UTC date has changed. Must be called with lock held.
 func (s *SpendTracker) checkReset() {
-	today := time.Now().UTC().YearDay()
-	if today != s.resetDay {
+	today := time.Now().UTC().Format("2006-01-02")
+	if today != s.resetDate {
 		s.accounts = make(map[string]*accountSpend)
-		s.resetDay = today
+		s.resetDate = today
 	}
 }
 

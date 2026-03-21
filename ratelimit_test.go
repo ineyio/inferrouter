@@ -10,119 +10,159 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRateLimiter_AllowUnderLimit(t *testing.T) {
+func TestRateLimiter_RPM_AllowUnderLimit(t *testing.T) {
 	rl := NewRateLimiter()
-	rl.SetLimit("acc1", 5)
+	rl.SetAccountDefault("acc1", Limits{RPM: 5})
 
 	for i := 0; i < 5; i++ {
-		assert.True(t, rl.Allow("acc1"), "request %d should be allowed", i+1)
+		assert.True(t, rl.Allow("acc1", "model-a"), "request %d should be allowed", i+1)
 	}
 }
 
-func TestRateLimiter_BlockAtLimit(t *testing.T) {
+func TestRateLimiter_RPM_BlockAtLimit(t *testing.T) {
 	rl := NewRateLimiter()
-	rl.SetLimit("acc1", 3)
+	rl.SetAccountDefault("acc1", Limits{RPM: 3})
 
-	assert.True(t, rl.Allow("acc1"))
-	assert.True(t, rl.Allow("acc1"))
-	assert.True(t, rl.Allow("acc1"))
-	assert.False(t, rl.Allow("acc1"), "4th request should be blocked")
-	assert.False(t, rl.Allow("acc1"), "5th request should also be blocked")
+	assert.True(t, rl.Allow("acc1", "model-a"))
+	assert.True(t, rl.Allow("acc1", "model-a"))
+	assert.True(t, rl.Allow("acc1", "model-a"))
+	assert.False(t, rl.Allow("acc1", "model-a"), "4th request should be blocked")
 }
 
-func TestRateLimiter_SlidingWindowExpiry(t *testing.T) {
+func TestRateLimiter_RPM_SlidingWindowExpiry(t *testing.T) {
 	rl := NewRateLimiter()
-	rl.SetLimit("acc1", 2)
+	rl.SetAccountDefault("acc1", Limits{RPM: 2})
 
 	now := time.Now()
 	rl.now = func() time.Time { return now }
 
-	assert.True(t, rl.Allow("acc1"))
-	assert.True(t, rl.Allow("acc1"))
-	assert.False(t, rl.Allow("acc1"), "at limit")
+	assert.True(t, rl.Allow("acc1", "m"))
+	assert.True(t, rl.Allow("acc1", "m"))
+	assert.False(t, rl.Allow("acc1", "m"))
 
-	// Advance time by 61 seconds — old requests should expire.
+	// Advance 61s — old requests expire.
 	rl.now = func() time.Time { return now.Add(61 * time.Second) }
-
-	assert.True(t, rl.Allow("acc1"), "should be allowed after window expires")
-	assert.True(t, rl.Allow("acc1"))
-	assert.False(t, rl.Allow("acc1"), "at limit again")
+	assert.True(t, rl.Allow("acc1", "m"))
 }
 
-func TestRateLimiter_PartialExpiry(t *testing.T) {
+func TestRateLimiter_RPH(t *testing.T) {
 	rl := NewRateLimiter()
-	rl.SetLimit("acc1", 3)
+	rl.SetModelLimits("acc1", "m", Limits{RPH: 3})
 
 	now := time.Now()
 	rl.now = func() time.Time { return now }
 
-	assert.True(t, rl.Allow("acc1")) // t=0
+	assert.True(t, rl.Allow("acc1", "m"))
+	assert.True(t, rl.Allow("acc1", "m"))
+	assert.True(t, rl.Allow("acc1", "m"))
+	assert.False(t, rl.Allow("acc1", "m"), "RPH limit reached")
 
-	// Advance 30s, add another
-	rl.now = func() time.Time { return now.Add(30 * time.Second) }
-	assert.True(t, rl.Allow("acc1")) // t=30s
-
-	// Advance 40s more (t=70s) — first request expired, second still valid
-	rl.now = func() time.Time { return now.Add(70 * time.Second) }
-	assert.True(t, rl.Allow("acc1"))  // t=70s (window has t=30s and t=70s)
-	assert.True(t, rl.Allow("acc1"))  // t=70s (window has t=30s, t=70s, t=70s)
-	assert.False(t, rl.Allow("acc1")) // at limit
+	// Advance 61 minutes — RPH window expires.
+	rl.now = func() time.Time { return now.Add(61 * time.Minute) }
+	assert.True(t, rl.Allow("acc1", "m"))
 }
 
-func TestRateLimiter_UnknownAccountAllowed(t *testing.T) {
+func TestRateLimiter_RPD(t *testing.T) {
 	rl := NewRateLimiter()
-	rl.SetLimit("acc1", 1)
+	rl.SetModelLimits("acc1", "m", Limits{RPD: 5})
 
-	// Unknown account has no limit → always allowed.
-	assert.True(t, rl.Allow("unknown"))
-	assert.True(t, rl.Allow("unknown"))
-	assert.True(t, rl.Allow("unknown"))
+	now := time.Now()
+	rl.now = func() time.Time { return now }
+
+	for i := 0; i < 5; i++ {
+		assert.True(t, rl.Allow("acc1", "m"))
+	}
+	assert.False(t, rl.Allow("acc1", "m"), "RPD limit reached")
+
+	// Advance 25 hours — RPD window expires.
+	rl.now = func() time.Time { return now.Add(25 * time.Hour) }
+	assert.True(t, rl.Allow("acc1", "m"))
 }
 
-func TestRateLimiter_MultipleAccounts(t *testing.T) {
+func TestRateLimiter_MultiWindow_RPM_Triggers_First(t *testing.T) {
 	rl := NewRateLimiter()
-	rl.SetLimit("acc1", 1)
-	rl.SetLimit("acc2", 2)
+	rl.SetModelLimits("acc1", "m", Limits{RPM: 2, RPH: 100, RPD: 1000})
 
-	assert.True(t, rl.Allow("acc1"))
-	assert.False(t, rl.Allow("acc1"), "acc1 at limit")
+	assert.True(t, rl.Allow("acc1", "m"))
+	assert.True(t, rl.Allow("acc1", "m"))
+	assert.False(t, rl.Allow("acc1", "m"), "RPM should trigger before RPH/RPD")
+}
 
-	assert.True(t, rl.Allow("acc2"))
-	assert.True(t, rl.Allow("acc2"))
-	assert.False(t, rl.Allow("acc2"), "acc2 at limit")
+func TestRateLimiter_ModelSpecific_IndependentLimits(t *testing.T) {
+	rl := NewRateLimiter()
+	rl.SetModelLimits("acc1", "gpt-oss-120b", Limits{RPM: 1})
+	rl.SetModelLimits("acc1", "qwen-3-235b", Limits{RPM: 1})
+
+	// Each model has its own budget.
+	assert.True(t, rl.Allow("acc1", "gpt-oss-120b"))
+	assert.False(t, rl.Allow("acc1", "gpt-oss-120b"), "gpt at limit")
+
+	assert.True(t, rl.Allow("acc1", "qwen-3-235b"), "qwen should be independent")
+	assert.False(t, rl.Allow("acc1", "qwen-3-235b"), "qwen at limit")
+}
+
+func TestRateLimiter_AccountDefault_Fallback(t *testing.T) {
+	rl := NewRateLimiter()
+	rl.SetModelLimits("acc1", "model-a", Limits{RPM: 1})
+	rl.SetAccountDefault("acc1", Limits{RPM: 2})
+
+	// model-a uses its specific limit (1).
+	assert.True(t, rl.Allow("acc1", "model-a"))
+	assert.False(t, rl.Allow("acc1", "model-a"))
+
+	// model-b falls back to account default (2).
+	assert.True(t, rl.Allow("acc1", "model-b"))
+	assert.True(t, rl.Allow("acc1", "model-b"))
+	assert.False(t, rl.Allow("acc1", "model-b"))
+}
+
+func TestRateLimiter_UnknownAccount_Unlimited(t *testing.T) {
+	rl := NewRateLimiter()
+	rl.SetModelLimits("acc1", "m", Limits{RPM: 1})
+
+	// Unknown account has no limits.
+	for i := 0; i < 100; i++ {
+		assert.True(t, rl.Allow("unknown", "m"))
+	}
+}
+
+func TestRateLimiter_BackwardCompat_SetLimit(t *testing.T) {
+	rl := NewRateLimiter()
+	rl.SetLimit("acc1", 2) // old API
+
+	assert.True(t, rl.Allow("acc1", "any-model"))
+	assert.True(t, rl.Allow("acc1", "any-model"))
+	assert.False(t, rl.Allow("acc1", "any-model"))
 }
 
 func TestRateLimiter_Reset(t *testing.T) {
 	rl := NewRateLimiter()
-	rl.SetLimit("acc1", 1)
+	rl.SetAccountDefault("acc1", Limits{RPM: 1})
 
-	assert.True(t, rl.Allow("acc1"))
-	assert.False(t, rl.Allow("acc1"))
+	assert.True(t, rl.Allow("acc1", "m"))
+	assert.False(t, rl.Allow("acc1", "m"))
 
 	rl.Reset()
-
-	assert.True(t, rl.Allow("acc1"), "should be allowed after reset")
+	assert.True(t, rl.Allow("acc1", "m"))
 }
 
 func TestRateLimiter_ResetAccount(t *testing.T) {
 	rl := NewRateLimiter()
-	rl.SetLimit("acc1", 1)
-	rl.SetLimit("acc2", 1)
+	rl.SetAccountDefault("acc1", Limits{RPM: 1})
+	rl.SetAccountDefault("acc2", Limits{RPM: 1})
 
-	assert.True(t, rl.Allow("acc1"))
-	assert.True(t, rl.Allow("acc2"))
-	assert.False(t, rl.Allow("acc1"))
-	assert.False(t, rl.Allow("acc2"))
+	assert.True(t, rl.Allow("acc1", "m"))
+	assert.True(t, rl.Allow("acc2", "m"))
 
 	rl.ResetAccount("acc1")
 
-	assert.True(t, rl.Allow("acc1"), "acc1 should be allowed after reset")
-	assert.False(t, rl.Allow("acc2"), "acc2 should still be limited")
+	assert.True(t, rl.Allow("acc1", "m"), "acc1 reset")
+	assert.False(t, rl.Allow("acc2", "m"), "acc2 still limited")
 }
 
 func TestRateLimiter_ConcurrentAccess(t *testing.T) {
 	rl := NewRateLimiter()
-	rl.SetLimit("acc1", 100)
+	rl.SetAccountDefault("acc1", Limits{RPM: 100})
 
 	var allowed atomic.Int64
 	var wg sync.WaitGroup
@@ -131,13 +171,28 @@ func TestRateLimiter_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if rl.Allow("acc1") {
+			if rl.Allow("acc1", "m") {
 				allowed.Add(1)
 			}
 		}()
 	}
 
 	wg.Wait()
+	require.Equal(t, int64(100), allowed.Load())
+}
 
-	require.Equal(t, int64(100), allowed.Load(), "exactly 100 requests should be allowed")
+func TestRateLimiter_CerebrasScenario(t *testing.T) {
+	// Simulate: gpt-oss-120b hits RPD, fall back to qwen-3-235b.
+	rl := NewRateLimiter()
+	rl.SetModelLimits("cerebras-free", "gpt-oss-120b", Limits{RPM: 30, RPD: 5})
+	rl.SetModelLimits("cerebras-free", "qwen-3-235b", Limits{RPM: 30, RPD: 5})
+
+	// Exhaust gpt-oss-120b RPD.
+	for i := 0; i < 5; i++ {
+		assert.True(t, rl.Allow("cerebras-free", "gpt-oss-120b"))
+	}
+	assert.False(t, rl.Allow("cerebras-free", "gpt-oss-120b"), "gpt RPD exhausted")
+
+	// qwen-3-235b still has budget.
+	assert.True(t, rl.Allow("cerebras-free", "qwen-3-235b"), "qwen should be independent")
 }
