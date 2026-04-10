@@ -11,14 +11,16 @@ import (
 
 // Provider is a mock LLM provider for testing.
 type Provider struct {
-	name        string
-	models      []string
-	latency     time.Duration
-	failAfter   int
-	callCount   atomic.Int64
-	staticErr   error
-	usage       inferrouter.Usage
+	name         string
+	models       []string
+	latency      time.Duration
+	failAfter    int
+	callCount    atomic.Int64
+	staticErr    error
+	usage        inferrouter.Usage
 	responseFunc func(inferrouter.ProviderRequest) (inferrouter.ProviderResponse, error)
+	multimodal   bool
+	breakdownFn  func(inferrouter.ProviderRequest) inferrouter.InputTokenBreakdown
 }
 
 var _ inferrouter.Provider = (*Provider)(nil)
@@ -78,7 +80,22 @@ func WithResponseFunc(fn func(inferrouter.ProviderRequest) (inferrouter.Provider
 	return func(p *Provider) { p.responseFunc = fn }
 }
 
+// WithMultimodal marks this mock as supporting media parts.
+func WithMultimodal(enabled bool) Option {
+	return func(p *Provider) { p.multimodal = enabled }
+}
+
+// WithInputBreakdownFunc lets tests supply a deterministic per-modality
+// token breakdown based on the request. When set, the returned breakdown is
+// attached to the mock response's Usage. Useful for exercising cost paths
+// without a real Gemini key.
+func WithInputBreakdownFunc(fn func(inferrouter.ProviderRequest) inferrouter.InputTokenBreakdown) Option {
+	return func(p *Provider) { p.breakdownFn = fn }
+}
+
 func (p *Provider) Name() string { return p.name }
+
+func (p *Provider) SupportsMultimodal() bool { return p.multimodal }
 
 func (p *Provider) SupportsModel(model string) bool {
 	for _, m := range p.models {
@@ -112,11 +129,18 @@ func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderR
 		return p.responseFunc(req)
 	}
 
+	usage := p.usage
+	if p.breakdownFn != nil {
+		b := p.breakdownFn(req)
+		usage.InputBreakdown = &b
+		usage.PromptTokens = b.Text + b.Audio + b.Image + b.Video
+	}
+
 	return inferrouter.ProviderResponse{
 		ID:           "mock-response-id",
 		Content:      "Hello from mock provider",
 		FinishReason: "stop",
-		Usage:        p.usage,
+		Usage:        usage,
 		Model:        req.Model,
 	}, nil
 }

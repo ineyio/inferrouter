@@ -130,15 +130,20 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 
 // --- Domain phases of a routing request ---
 
-// prepareRoute resolves the model, builds and orders candidates.
-func (r *Router) prepareRoute(ctx context.Context, requestModel string) ([]Candidate, error) {
+// prepareRoute resolves the model, builds, filters, and orders candidates.
+// When needMultimodal is true and the filter empties the list, the more
+// specific ErrMultimodalUnavailable is returned instead of ErrNoCandidates.
+func (r *Router) prepareRoute(ctx context.Context, requestModel string, needMultimodal bool) ([]Candidate, error) {
 	candidates, err := buildCandidates(ctx, r.cfg, r.providers, r.quotaStore, r.health, r.spend, requestModel)
 	if err != nil {
 		return nil, err
 	}
 
-	candidates = filterCandidates(candidates, r.cfg.AllowPaid)
+	candidates = filterCandidates(candidates, r.cfg.AllowPaid, needMultimodal)
 	if len(candidates) == 0 {
+		if needMultimodal {
+			return nil, ErrMultimodalUnavailable
+		}
 		return nil, ErrNoCandidates
 	}
 
@@ -243,8 +248,20 @@ func (r *Router) settleSuccess(ctx context.Context, c Candidate, reservation Res
 	})
 }
 
+// messagesHaveMedia reports whether any message carries non-text parts.
+func messagesHaveMedia(msgs []Message) bool {
+	for _, m := range msgs {
+		for _, p := range m.Parts {
+			if p.IsMedia() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // buildProviderRequest creates the request to send to the provider.
-func buildProviderRequest(c Candidate, req ChatRequest, stream bool) ProviderRequest {
+func buildProviderRequest(c Candidate, req ChatRequest, stream, hasMedia bool) ProviderRequest {
 	return ProviderRequest{
 		Auth:        c.Auth,
 		Model:       c.Model,
@@ -254,6 +271,7 @@ func buildProviderRequest(c Candidate, req ChatRequest, stream bool) ProviderReq
 		TopP:        req.TopP,
 		Stop:        req.Stop,
 		Stream:      stream,
+		HasMedia:    hasMedia,
 	}
 }
 
@@ -273,8 +291,9 @@ func allFailedError(tried []CandidateError, total int) error {
 // ChatCompletion performs a synchronous chat completion with automatic routing.
 func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, error) {
 	estimatedTokens := EstimateTokens(req.Messages)
+	hasMedia := messagesHaveMedia(req.Messages)
 
-	ordered, err := r.prepareRoute(ctx, req.Model)
+	ordered, err := r.prepareRoute(ctx, req.Model, hasMedia)
 	if err != nil {
 		return ChatResponse{}, err
 	}
@@ -297,7 +316,7 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		})
 
 		start := time.Now()
-		resp, err := c.Provider.ChatCompletion(ctx, buildProviderRequest(c, req, false))
+		resp, err := c.Provider.ChatCompletion(ctx, buildProviderRequest(c, req, false, hasMedia))
 		duration := time.Since(start)
 
 		if err != nil {
@@ -336,8 +355,9 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 // ChatCompletionStream performs a streaming chat completion with automatic routing.
 func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*RouterStream, error) {
 	estimatedTokens := EstimateTokens(req.Messages)
+	hasMedia := messagesHaveMedia(req.Messages)
 
-	ordered, err := r.prepareRoute(ctx, req.Model)
+	ordered, err := r.prepareRoute(ctx, req.Model, hasMedia)
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +379,7 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 			EstimatedIn: estimatedTokens,
 		})
 
-		stream, err := c.Provider.ChatCompletionStream(ctx, buildProviderRequest(c, req, true))
+		stream, err := c.Provider.ChatCompletionStream(ctx, buildProviderRequest(c, req, true, hasMedia))
 		if err != nil {
 			fatal, ce := r.settleFailure(ctx, c, reservation, err, 0, attempt)
 			if fatal != nil {

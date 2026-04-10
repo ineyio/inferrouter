@@ -7,16 +7,22 @@ import (
 
 // Sentinel errors.
 var (
-	ErrNoCandidates       = errors.New("inferrouter: no candidates available")
-	ErrNoFreeQuota        = errors.New("inferrouter: no free quota remaining")
-	ErrQuotaExceeded      = errors.New("inferrouter: quota exceeded")
-	ErrRateLimited        = errors.New("inferrouter: rate limited by provider")
-	ErrAuthFailed         = errors.New("inferrouter: authentication failed")
-	ErrInvalidRequest     = errors.New("inferrouter: invalid request")
+	ErrNoCandidates        = errors.New("inferrouter: no candidates available")
+	ErrNoFreeQuota         = errors.New("inferrouter: no free quota remaining")
+	ErrQuotaExceeded       = errors.New("inferrouter: quota exceeded")
+	ErrRateLimited         = errors.New("inferrouter: rate limited by provider")
+	ErrAuthFailed          = errors.New("inferrouter: authentication failed")
+	ErrInvalidRequest      = errors.New("inferrouter: invalid request")
 	ErrProviderUnavailable = errors.New("inferrouter: provider unavailable")
-	ErrModelNotFound      = errors.New("inferrouter: model not found")
-	ErrAllFailed          = errors.New("inferrouter: all candidates failed")
-	ErrRPMExceeded        = errors.New("inferrouter: requests per minute limit exceeded")
+	ErrModelNotFound       = errors.New("inferrouter: model not found")
+	ErrAllFailed           = errors.New("inferrouter: all candidates failed")
+	ErrRPMExceeded         = errors.New("inferrouter: requests per minute limit exceeded")
+
+	// ErrMultimodalUnavailable is returned when a request contains media parts
+	// but no multimodal-capable candidate is available (all filtered out or
+	// unhealthy). Not retryable with text-only fallback — callers should catch
+	// this explicitly and either degrade (strip media) or fail the request.
+	ErrMultimodalUnavailable = errors.New("inferrouter: no multimodal-capable candidates available")
 )
 
 // CandidateError records the error from a single candidate attempt.

@@ -24,24 +24,34 @@ No Makefile, no linter configured, no CI config. Module: `github.com/ineyio/infe
 
 ```
 ChatCompletion(req)
+  → messagesHaveMedia(req.Messages) → hasMedia bool (precomputed once)
   → resolveModel() (alias or direct)
-  → EstimateTokens()
-  → buildCandidates() (Provider × Account × Model tuples)
-  → filterCandidates() (remove unhealthy, paid if disallowed)
+  → EstimateTokens()  (handles text + per-modality byte heuristics)
+  → buildCandidates() (Provider × Account × Model tuples; per-modality cost rates normalized via resolveModalityCost fallback)
+  → filterCandidates(allowPaid, needMultimodal) (unhealthy, paid, spend-cap, multimodal-capable)
+  → len==0 → ErrMultimodalUnavailable (if hasMedia) else ErrNoCandidates
   → policy.Select() (sort by priority)
   → Loop candidates: Reserve → Execute → Commit/Rollback
 ```
 
-Fatal errors (`ErrAuthFailed`, `ErrInvalidRequest`) stop the loop immediately. Retryable errors (`ErrRateLimited`, `ErrProviderUnavailable`, `ErrQuotaExceeded`) try the next candidate.
+Fatal errors (`ErrAuthFailed`, `ErrInvalidRequest`) stop the loop immediately. Retryable errors (`ErrRateLimited`, `ErrProviderUnavailable`, `ErrQuotaExceeded`) try the next candidate. `ErrMultimodalUnavailable` is neither — callers are expected to catch it explicitly and degrade (e.g. strip media, retry via text alias).
 
 ### Core Interfaces (all in root package)
 
 | Interface | Purpose | Implementations |
 |-----------|---------|----------------|
-| `Provider` | LLM API adapter | `provider/openaicompat` (OpenAI, Grok, Cerebras), `provider/gemini`, `provider/mock` |
+| `Provider` | LLM API adapter (`Name`, `SupportsModel`, `SupportsMultimodal`, `ChatCompletion`, `ChatCompletionStream`) | `provider/openaicompat` (OpenAI, Grok, Cerebras — text-only), `provider/gemini` (multimodal), `provider/gonka`, `provider/mock` |
 | `Policy` | Candidate sorting strategy | `policy.FreeFirstPolicy`, `policy.CostFirstPolicy` |
 | `QuotaStore` | Reserve/Commit/Rollback quota | `quota.MemoryQuotaStore`, `quota/redis.Store`, `quota/postgres.Store` |
 | `Meter` | Observability events | `meter.NoopMeter`, `meter.LogMeter` |
+
+### Multimodal types
+
+- **`Message.Parts []Part`** — multi-part content for image/audio/video. Non-nil `Parts` takes precedence over legacy `Content string`.
+- **`Part{Type, Text, MIMEType, Data []byte}`** — caller passes raw bytes, providers handle base64 encoding internally.
+- **`Usage.InputBreakdown *InputTokenBreakdown`** — per-modality (Text/Audio/Image/Video) split of PromptTokens. Gemini populates this from `promptTokensDetails[]`. Nil for text-only providers.
+- **`Usage.CachedTokens int64`** — subset of PromptTokens served from context cache. **Observability-only**, not subtracted from cost (avoids double-counting the server-side discount).
+- **`ProviderRequest.HasMedia bool`** — precomputed by router so providers don't re-walk messages on the streaming path.
 
 ### Key Patterns
 
@@ -50,6 +60,7 @@ Fatal errors (`ErrAuthFailed`, `ErrInvalidRequest`) stop the loop immediately. R
 - **Streaming** (`stream.go`): `RouterStream` wraps provider stream; commits quota on `Close()`. Uses `context.Background()` for cleanup to avoid cancelled context issues.
 - **QuotaInitializer**: If QuotaStore implements this optional interface, `NewRouter()` auto-initializes quotas from config.
 - **NoopQuotaStore/NoopMeter**: Default no-ops when not configured — allows running without quota tracking.
+- **Pre-normalized modality costs**: `buildCandidates` resolves zero `CostPerAudio/Image/VideoInputToken` to `CostPerInputToken` via `resolveModalityCost`, so `calculateSpend` can multiply without fallback branches.
 
 ### Config
 

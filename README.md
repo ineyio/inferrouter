@@ -31,12 +31,12 @@ func main() {
     qs := quota.NewMemoryQuotaStore()
 
     cfg := ir.Config{
-        DefaultModel: "gemini-2.0-flash",
+        DefaultModel: "gemini-2.5-flash-lite",
         Accounts: []ir.AccountConfig{
             {
                 Provider: "gemini", ID: "gemini-free",
                 Auth: ir.Auth{APIKey: "your-key"},
-                DailyFree: 1500, QuotaUnit: ir.QuotaRequests,
+                DailyFree: 1000, QuotaUnit: ir.QuotaRequests,
             },
         },
     }
@@ -74,7 +74,7 @@ cfg := ir.Config{
         {
             Alias: "fast",
             Models: []ir.ModelRef{
-                {Provider: "gemini", Model: "gemini-2.0-flash"},
+                {Provider: "gemini", Model: "gemini-2.5-flash-lite"},
                 {Provider: "grok", Model: "grok-3-fast"},
                 {Provider: "openai", Model: "gpt-4o-mini"},
             },
@@ -100,7 +100,7 @@ models:
   - alias: "fast"
     models:
       - provider: gemini
-        model: gemini-2.0-flash
+        model: gemini-2.5-flash-lite
       - provider: grok
         model: grok-3-fast
 accounts:
@@ -128,7 +128,7 @@ Define aliases that map to different models per provider:
 models:
   - alias: "fast"
     models:
-      - { provider: gemini, model: gemini-2.0-flash }
+      - { provider: gemini, model: gemini-2.5-flash-lite }
       - { provider: grok, model: grok-3-fast }
       - { provider: openai, model: gpt-4o-mini }
   - alias: "smart"
@@ -201,6 +201,67 @@ for {
 }
 ```
 
+## Multimodal (image / audio / video)
+
+Providers that support multimodal input (currently `provider/gemini`) accept media parts alongside text. Pass raw bytes via `Message.Parts` — the provider handles base64 encoding internally.
+
+```go
+resp, err := router.ChatCompletion(ctx, ir.ChatRequest{
+    Model: "multimodal",
+    Messages: []ir.Message{
+        {
+            Role: "user",
+            Parts: []ir.Part{
+                {Type: ir.PartText, Text: "What's in this photo?"},
+                {Type: ir.PartImage, MIMEType: "image/jpeg", Data: photoBytes},
+            },
+        },
+    },
+})
+```
+
+When a request carries media, the router automatically filters candidates to providers whose `SupportsMultimodal()` returns true. If none are available (all filtered out or circuit-broken), it returns `ErrMultimodalUnavailable` — callers can catch this sentinel and degrade gracefully:
+
+```go
+if errors.Is(err, ir.ErrMultimodalUnavailable) {
+    // Strip media, retry with a text-only alias
+    return retryWithStrippedMedia(ctx, req)
+}
+```
+
+### Per-modality cost and usage
+
+`Usage.InputBreakdown` splits prompt tokens by modality for providers that report it (Gemini via `promptTokensDetails[]`):
+
+```go
+resp, _ := router.ChatCompletion(ctx, req)
+if b := resp.Usage.InputBreakdown; b != nil {
+    fmt.Printf("text=%d image=%d audio=%d video=%d\n", b.Text, b.Image, b.Audio, b.Video)
+}
+// Observability-only — does NOT reduce cost (providers already price cached
+// content server-side).
+fmt.Println("cached tokens:", resp.Usage.CachedTokens)
+```
+
+Configure per-modality rates in the account (zero values fall back to the text input rate):
+
+```yaml
+accounts:
+  - provider: gemini
+    id: gemini-paid
+    auth: { api_key: "${GEMINI_API_KEY}" }
+    quota_unit: tokens
+    paid_enabled: true
+    cost_per_input_token:       0.0000001  # $0.10 / 1M  (text/image/video baseline)
+    cost_per_output_token:      0.0000004  # $0.40 / 1M
+    cost_per_audio_input_token: 0.0000003  # $0.30 / 1M  (audio has a higher rate)
+    max_daily_spend: 0.50
+```
+
+### LogMeter fields
+
+`LogMeter.OnResult` emits `text_tokens`, `audio_tokens`, `image_tokens`, `video_tokens`, and `cached_tokens` only when non-zero. Text-only providers (Cerebras, OpenAI) see zero diff in their log shape.
+
 ## Quota Stores
 
 The default `MemoryQuotaStore` is in-memory and doesn't survive restarts. For production, use Redis or PostgreSQL.
@@ -252,11 +313,11 @@ Durable quota state with transactional Reserve. Call `CleanupIdempotency(ctx, 24
 ## How It Works
 
 1. **Resolve model** — alias lookup or direct match
-2. **Build candidates** — Provider x Account x Model (filtered by SupportsModel)
-3. **Filter** — remove unhealthy (circuit breaker), remove paid if AllowPaid=false
+2. **Build candidates** — Provider x Account x Model (filtered by SupportsModel); per-modality cost rates pre-resolved from account config
+3. **Filter** — remove unhealthy (circuit breaker), remove paid if AllowPaid=false, and (when request has media) drop providers whose SupportsMultimodal=false
 4. **Policy.Select** — order candidates by priority
 5. **Loop**: Reserve quota -> Execute -> Commit (success) / Rollback+next (failure)
-6. **Error classification**: fatal (400, 401) -> return immediately, retryable (429, 5xx) -> try next
+6. **Error classification**: fatal (400, 401) -> return immediately, retryable (429, 5xx) -> try next. Multimodal requests with no capable candidate return `ErrMultimodalUnavailable` instead of the generic `ErrNoCandidates`.
 
 ## License
 

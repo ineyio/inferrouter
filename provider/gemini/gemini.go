@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -20,6 +22,7 @@ type Provider struct {
 	baseURL    string
 	httpClient *http.Client
 	models     []string
+	logger     *slog.Logger
 }
 
 var _ inferrouter.Provider = (*Provider)(nil)
@@ -42,6 +45,12 @@ func WithModels(models ...string) Option {
 	return func(p *Provider) { p.models = models }
 }
 
+// WithLogger sets a logger for warnings (e.g. missing promptTokensDetails).
+// If not set, slog.Default() is used.
+func WithLogger(l *slog.Logger) Option {
+	return func(p *Provider) { p.logger = l }
+}
+
 // New creates a new Gemini provider.
 func New(opts ...Option) *Provider {
 	p := &Provider{
@@ -50,6 +59,9 @@ func New(opts ...Option) *Provider {
 	}
 	for _, opt := range opts {
 		opt(p)
+	}
+	if p.logger == nil {
+		p.logger = slog.Default()
 	}
 	return p
 }
@@ -68,9 +80,12 @@ func (p *Provider) SupportsModel(model string) bool {
 	return false
 }
 
+// SupportsMultimodal reports that Gemini accepts media parts (image/audio/video).
+func (p *Provider) SupportsMultimodal() bool { return true }
+
 // Gemini API types.
 type geminiRequest struct {
-	Contents         []geminiContent        `json:"contents"`
+	Contents         []geminiContent         `json:"contents"`
 	GenerationConfig *geminiGenerationConfig `json:"generationConfig,omitempty"`
 }
 
@@ -80,14 +95,33 @@ type geminiContent struct {
 }
 
 type geminiPart struct {
-	Text string `json:"text"`
+	Text       string            `json:"text,omitempty"`
+	InlineData *geminiInlineData `json:"inline_data,omitempty"`
+}
+
+type geminiInlineData struct {
+	MIMEType string `json:"mime_type"`
+	Data     string `json:"data"` // base64-encoded
 }
 
 type geminiGenerationConfig struct {
-	Temperature   *float64 `json:"temperature,omitempty"`
-	MaxOutputTokens *int   `json:"maxOutputTokens,omitempty"`
-	TopP          *float64 `json:"topP,omitempty"`
-	StopSequences []string `json:"stopSequences,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+	MaxOutputTokens *int     `json:"maxOutputTokens,omitempty"`
+	TopP            *float64 `json:"topP,omitempty"`
+	StopSequences   []string `json:"stopSequences,omitempty"`
+}
+
+type geminiTokenDetail struct {
+	Modality   string `json:"modality"`
+	TokenCount int64  `json:"tokenCount"`
+}
+
+type geminiUsageMetadata struct {
+	PromptTokenCount        int64               `json:"promptTokenCount"`
+	CandidatesTokenCount    int64               `json:"candidatesTokenCount"`
+	TotalTokenCount         int64               `json:"totalTokenCount"`
+	CachedContentTokenCount int64               `json:"cachedContentTokenCount"`
+	PromptTokensDetails     []geminiTokenDetail `json:"promptTokensDetails"`
 }
 
 type geminiResponse struct {
@@ -95,12 +129,8 @@ type geminiResponse struct {
 		Content      geminiContent `json:"content"`
 		FinishReason string        `json:"finishReason"`
 	} `json:"candidates"`
-	UsageMetadata struct {
-		PromptTokenCount     int64 `json:"promptTokenCount"`
-		CandidatesTokenCount int64 `json:"candidatesTokenCount"`
-		TotalTokenCount      int64 `json:"totalTokenCount"`
-	} `json:"usageMetadata"`
-	ModelVersion string `json:"modelVersion"`
+	UsageMetadata geminiUsageMetadata `json:"usageMetadata"`
+	ModelVersion  string              `json:"modelVersion"`
 }
 
 func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderRequest) (inferrouter.ProviderResponse, error) {
@@ -136,12 +166,66 @@ func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderR
 		Content:      content,
 		FinishReason: strings.ToLower(resp.Candidates[0].FinishReason),
 		Model:        req.Model,
-		Usage: inferrouter.Usage{
-			PromptTokens:     resp.UsageMetadata.PromptTokenCount,
-			CompletionTokens: resp.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:      resp.UsageMetadata.TotalTokenCount,
-		},
+		Usage:        p.buildUsage(resp.UsageMetadata, req),
 	}, nil
+}
+
+// buildUsage maps Gemini usageMetadata to inferrouter.Usage.
+//
+// When promptTokensDetails is absent for a text-only request, we synthesize
+// {Text: PromptTokens} so callers have a single non-nil breakdown code path.
+// When absent for a multimodal request it's left nil and a warning is logged
+// — that combination signals Gemini API drift and the caller should notice.
+//
+// CachedTokens is copied as-is; it's a subset of PromptTokens that must NOT
+// reduce the cost (Google already priced it server-side; subtracting would
+// double-count).
+func (p *Provider) buildUsage(meta geminiUsageMetadata, req inferrouter.ProviderRequest) inferrouter.Usage {
+	u := inferrouter.Usage{
+		PromptTokens:     meta.PromptTokenCount,
+		CompletionTokens: meta.CandidatesTokenCount,
+		TotalTokens:      meta.TotalTokenCount,
+		CachedTokens:     meta.CachedContentTokenCount,
+	}
+
+	if len(meta.PromptTokensDetails) > 0 {
+		u.InputBreakdown = p.buildBreakdown(meta.PromptTokensDetails)
+		return u
+	}
+
+	if !req.HasMedia {
+		u.InputBreakdown = &inferrouter.InputTokenBreakdown{Text: meta.PromptTokenCount}
+		return u
+	}
+
+	p.logger.Warn("gemini response missing promptTokensDetails for multimodal request",
+		"prompt_tokens", meta.PromptTokenCount,
+		"model", req.Model,
+	)
+	return u
+}
+
+// buildBreakdown converts Gemini's per-modality details into our struct.
+// Unknown modalities (e.g. a future DOCUMENT type) fold into Text with a warning.
+func (p *Provider) buildBreakdown(details []geminiTokenDetail) *inferrouter.InputTokenBreakdown {
+	b := &inferrouter.InputTokenBreakdown{}
+	for _, d := range details {
+		switch strings.ToUpper(d.Modality) {
+		case "TEXT":
+			b.Text += d.TokenCount
+		case "AUDIO":
+			b.Audio += d.TokenCount
+		case "IMAGE":
+			b.Image += d.TokenCount
+		case "VIDEO":
+			b.Video += d.TokenCount
+		default:
+			p.logger.Warn("gemini: unknown modality in promptTokensDetails, folding into Text",
+				"modality", d.Modality, "tokens", d.TokenCount)
+			b.Text += d.TokenCount
+		}
+	}
+	return b
 }
 
 func (p *Provider) ChatCompletionStream(ctx context.Context, req inferrouter.ProviderRequest) (inferrouter.ProviderStream, error) {
@@ -162,6 +246,8 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, req inferrouter.Pro
 		reader: bufio.NewReader(httpResp.Body),
 		body:   httpResp.Body,
 		model:  req.Model,
+		req:    req,
+		prov:   p,
 	}, nil
 }
 
@@ -174,7 +260,7 @@ func (p *Provider) buildRequest(req inferrouter.ProviderRequest) geminiRequest {
 		}
 		contents = append(contents, geminiContent{
 			Role:  role,
-			Parts: []geminiPart{{Text: m.Content}},
+			Parts: buildParts(m),
 		})
 	}
 
@@ -182,14 +268,37 @@ func (p *Provider) buildRequest(req inferrouter.ProviderRequest) geminiRequest {
 
 	if req.Temperature != nil || req.MaxTokens != nil || req.TopP != nil || len(req.Stop) > 0 {
 		gr.GenerationConfig = &geminiGenerationConfig{
-			Temperature:   req.Temperature,
+			Temperature:     req.Temperature,
 			MaxOutputTokens: req.MaxTokens,
-			TopP:          req.TopP,
-			StopSequences: req.Stop,
+			TopP:            req.TopP,
+			StopSequences:   req.Stop,
 		}
 	}
 
 	return gr
+}
+
+// buildParts maps inferrouter.Message to Gemini parts. If m.Parts is empty,
+// falls back to m.Content as a single text part (legacy path).
+func buildParts(m inferrouter.Message) []geminiPart {
+	if len(m.Parts) == 0 {
+		return []geminiPart{{Text: m.Content}}
+	}
+	parts := make([]geminiPart, 0, len(m.Parts))
+	for _, p := range m.Parts {
+		switch p.Type {
+		case inferrouter.PartText:
+			parts = append(parts, geminiPart{Text: p.Text})
+		case inferrouter.PartImage, inferrouter.PartAudio, inferrouter.PartVideo:
+			parts = append(parts, geminiPart{
+				InlineData: &geminiInlineData{
+					MIMEType: p.MIMEType,
+					Data:     base64.StdEncoding.EncodeToString(p.Data),
+				},
+			})
+		}
+	}
+	return parts
 }
 
 func (p *Provider) doRequest(ctx context.Context, url string, body geminiRequest) (*http.Response, error) {
@@ -245,6 +354,8 @@ type geminiStream struct {
 	reader    *bufio.Reader
 	body      io.ReadCloser
 	model     string
+	req       inferrouter.ProviderRequest
+	prov      *Provider
 	parseErrs int // consecutive parse errors
 }
 
@@ -289,11 +400,8 @@ func (s *geminiStream) Next() (inferrouter.StreamChunk, error) {
 		}
 
 		if resp.UsageMetadata.TotalTokenCount > 0 {
-			chunk.Usage = &inferrouter.Usage{
-				PromptTokens:     resp.UsageMetadata.PromptTokenCount,
-				CompletionTokens: resp.UsageMetadata.CandidatesTokenCount,
-				TotalTokens:      resp.UsageMetadata.TotalTokenCount,
-			}
+			u := s.prov.buildUsage(resp.UsageMetadata, s.req)
+			chunk.Usage = &u
 		}
 
 		return chunk, nil

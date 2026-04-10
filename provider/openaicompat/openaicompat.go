@@ -67,6 +67,11 @@ func NewCerebro(opts ...Option) *Provider {
 
 func (p *Provider) Name() string { return p.name }
 
+// SupportsMultimodal returns false. OpenAI-compatible backends support a
+// content[] array format for vision, but this provider does not yet serialize
+// Parts into that format — advertising true would silently strip media.
+func (p *Provider) SupportsMultimodal() bool { return false }
+
 func (p *Provider) SupportsModel(model string) bool {
 	if len(p.models) == 0 {
 		return true // no filter → accept all

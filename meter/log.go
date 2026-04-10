@@ -35,7 +35,8 @@ func (m *LogMeter) OnRoute(e inferrouter.RouteEvent) {
 
 func (m *LogMeter) OnResult(e inferrouter.ResultEvent) {
 	if e.Success {
-		m.Logger.Info("result",
+		attrs := make([]any, 0, 18)
+		attrs = append(attrs,
 			"provider", e.Provider,
 			"account", e.AccountID,
 			"model", e.Model,
@@ -45,6 +46,20 @@ func (m *LogMeter) OnResult(e inferrouter.ResultEvent) {
 			"completion_tokens", e.Usage.CompletionTokens,
 			"dollar_cost", e.DollarCost,
 		)
+		// Emit multimodal fields only when non-zero so text-only providers
+		// produce no log-shape change for existing parsers.
+		if e.Usage.CachedTokens > 0 {
+			attrs = append(attrs, "cached_tokens", e.Usage.CachedTokens)
+		}
+		if b := e.Usage.InputBreakdown; b != nil {
+			attrs = append(attrs,
+				"text_tokens", b.Text,
+				"audio_tokens", b.Audio,
+				"image_tokens", b.Image,
+				"video_tokens", b.Video,
+			)
+		}
+		m.Logger.Info("result", attrs...)
 	} else {
 		m.Logger.Warn("result_error",
 			"provider", e.Provider,

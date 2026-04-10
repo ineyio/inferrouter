@@ -105,6 +105,8 @@ func (p *Provider) Name() string { return p.inner.Name() }
 
 func (p *Provider) SupportsModel(model string) bool { return p.inner.SupportsModel(model) }
 
+func (p *Provider) SupportsMultimodal() bool { return p.inner.SupportsMultimodal() }
+
 func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderRequest) (inferrouter.ProviderResponse, error) {
 	return p.inner.ChatCompletion(ctx, req)
 }

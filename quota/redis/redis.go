@@ -23,7 +23,7 @@ type Store struct {
 }
 
 var (
-	_ inferrouter.QuotaStore      = (*Store)(nil)
+	_ inferrouter.QuotaStore       = (*Store)(nil)
 	_ inferrouter.QuotaInitializer = (*Store)(nil)
 )
 

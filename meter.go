@@ -23,13 +23,13 @@ type RouteEvent struct {
 
 // ResultEvent describes the outcome of a provider call.
 type ResultEvent struct {
-	Provider    string
-	AccountID   string
-	Model       string
-	Free        bool
-	Success     bool
-	Duration    time.Duration
-	Usage       Usage
-	Error       error
-	DollarCost  float64 // actual dollar cost for this request
+	Provider   string
+	AccountID  string
+	Model      string
+	Free       bool
+	Success    bool
+	Duration   time.Duration
+	Usage      Usage
+	Error      error
+	DollarCost float64 // actual dollar cost for this request
 }

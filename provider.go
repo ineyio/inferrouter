@@ -10,6 +10,10 @@ type Provider interface {
 	// SupportsModel returns true if this provider can handle the given model.
 	SupportsModel(model string) bool
 
+	// SupportsMultimodal reports whether this provider accepts media parts
+	// (image/audio/video) in messages. Text-only providers return false.
+	SupportsMultimodal() bool
+
 	// ChatCompletion performs a synchronous chat completion.
 	ChatCompletion(ctx context.Context, req ProviderRequest) (ProviderResponse, error)
 
@@ -33,6 +37,11 @@ type ProviderRequest struct {
 	TopP        *float64
 	Stop        []string
 	Stream      bool
+
+	// HasMedia is precomputed by the router so providers don't need to
+	// rewalk Messages/Parts (important on the streaming path where buildUsage
+	// fires per chunk).
+	HasMedia bool
 }
 
 // ProviderResponse is the response from a provider adapter.

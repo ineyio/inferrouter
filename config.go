@@ -43,6 +43,12 @@ type AccountConfig struct {
 	CostPerInputToken  float64 `yaml:"cost_per_input_token"`
 	CostPerOutputToken float64 `yaml:"cost_per_output_token"`
 
+	// Per-modality input costs. If zero for a given modality, CostPerInputToken
+	// is used as the fallback rate (text input rate as baseline).
+	CostPerAudioInputToken float64 `yaml:"cost_per_audio_input_token"`
+	CostPerImageInputToken float64 `yaml:"cost_per_image_input_token"`
+	CostPerVideoInputToken float64 `yaml:"cost_per_video_input_token"`
+
 	// RPM is the default requests-per-minute limit for this account (0 = unlimited).
 	// Applied to all models unless overridden by ModelLimits.
 	RPM int `yaml:"rpm"`
@@ -115,6 +121,15 @@ func (c Config) Validate() error {
 		}
 		if acc.CostPerOutputToken < 0 {
 			return fmt.Errorf("inferrouter: config: account[%d] (%s): cost_per_output_token must be >= 0", i, acc.ID)
+		}
+		if acc.CostPerAudioInputToken < 0 {
+			return fmt.Errorf("inferrouter: config: account[%d] (%s): cost_per_audio_input_token must be >= 0", i, acc.ID)
+		}
+		if acc.CostPerImageInputToken < 0 {
+			return fmt.Errorf("inferrouter: config: account[%d] (%s): cost_per_image_input_token must be >= 0", i, acc.ID)
+		}
+		if acc.CostPerVideoInputToken < 0 {
+			return fmt.Errorf("inferrouter: config: account[%d] (%s): cost_per_video_input_token must be >= 0", i, acc.ID)
 		}
 		if acc.RPM < 0 {
 			return fmt.Errorf("inferrouter: config: account[%d] (%s): rpm must be >= 0", i, acc.ID)

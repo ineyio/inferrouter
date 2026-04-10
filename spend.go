@@ -63,10 +63,28 @@ func (s *SpendTracker) checkReset() {
 }
 
 // calculateSpend computes the dollar cost for a request.
+//
+// Per-modality rates on Candidate are pre-resolved (zero values already
+// replaced with CostPerInputToken fallback in buildCandidates), so this
+// function does no fallback logic itself.
+//
+// CachedTokens is NOT subtracted: Google already priced cached tokens
+// server-side at the lower rate and reports the already-discounted count
+// in promptTokenCount. Subtracting would double-count the discount.
 func calculateSpend(c Candidate, usage Usage) float64 {
+	output := float64(usage.CompletionTokens) * c.CostPerOutputToken
+
+	if usage.InputBreakdown != nil {
+		b := usage.InputBreakdown
+		input := float64(b.Text)*c.CostPerInputToken +
+			float64(b.Audio)*c.CostPerAudioInputToken +
+			float64(b.Image)*c.CostPerImageInputToken +
+			float64(b.Video)*c.CostPerVideoInputToken
+		return input + output
+	}
+
 	if c.CostPerInputToken > 0 || c.CostPerOutputToken > 0 {
-		return float64(usage.PromptTokens)*c.CostPerInputToken +
-			float64(usage.CompletionTokens)*c.CostPerOutputToken
+		return float64(usage.PromptTokens)*c.CostPerInputToken + output
 	}
 	if c.CostPerToken > 0 {
 		return float64(usage.TotalTokens) * c.CostPerToken

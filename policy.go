@@ -23,6 +23,11 @@ type Candidate struct {
 	CostPerInputToken  float64
 	CostPerOutputToken float64
 
+	// Per-modality input rates. Zero means "fall back to CostPerInputToken".
+	CostPerAudioInputToken float64
+	CostPerImageInputToken float64
+	CostPerVideoInputToken float64
+
 	MaxDailySpend float64 // max daily dollar spend (0 = unlimited)
 	CurrentSpend  float64 // current daily dollar spend
 }
@@ -40,7 +45,7 @@ func (c Candidate) BlendedCost() float64 {
 type HealthState int
 
 const (
-	HealthHealthy  HealthState = iota
+	HealthHealthy HealthState = iota
 	HealthUnhealthy
 	HealthHalfOpen
 )
