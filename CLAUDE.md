@@ -20,7 +20,7 @@ No Makefile, no linter configured, no CI config. Module: `github.com/ineyio/infe
 
 ## Architecture
 
-### Routing Flow
+### Routing Flow (chat)
 
 ```
 ChatCompletion(req)
@@ -34,6 +34,26 @@ ChatCompletion(req)
   → Loop candidates: Reserve → Execute → Commit/Rollback
 ```
 
+### Routing Flow (embeddings)
+
+```
+EmbedBatch(req)
+  → resolveModel() (alias or direct)
+  → splitIntoBatches(inputs, MaxBatchSize) (100 for Gemini)
+  → For each sub-batch:
+      EstimateEmbedTokens(batch)
+      → buildEmbedCandidates() (EmbeddingProvider × Account × Model; separate from chat map)
+      → filterEmbedCandidates(allowPaid) (unhealthy, spend-cap)
+      → len==0 → ErrNoEmbeddingProviders
+      → free-first inline sort
+      → Loop candidates: Reserve → Embed → Commit/Rollback
+  → Consolidate: concat Embeddings (order preserved), sum Usage
+  → Partial failure: first failed sub-batch stops loop,
+    return EmbedResponse{prefix} + *ErrPartialBatch{ProcessedInputs}
+```
+
+**Single-model alias invariant for embeddings** (RFC §3.6): any alias that references an embedding model must contain exactly one `ModelRef`. Cross-model fallback is rejected at `NewRouter` with `ErrInvalidConfig` because embedding vector spaces are not compatible between different models — routing index and query to different models silently corrupts RAG retrieval. Multi-account fallback on the same model is the reliability pattern.
+
 Fatal errors (`ErrAuthFailed`, `ErrInvalidRequest`) stop the loop immediately. Retryable errors (`ErrRateLimited`, `ErrProviderUnavailable`, `ErrQuotaExceeded`) try the next candidate. `ErrMultimodalUnavailable` is neither — callers are expected to catch it explicitly and degrade (e.g. strip media, retry via text alias).
 
 ### Core Interfaces (all in root package)
@@ -41,6 +61,7 @@ Fatal errors (`ErrAuthFailed`, `ErrInvalidRequest`) stop the loop immediately. R
 | Interface | Purpose | Implementations |
 |-----------|---------|----------------|
 | `Provider` | LLM API adapter (`Name`, `SupportsModel`, `SupportsMultimodal`, `ChatCompletion`, `ChatCompletionStream`) | `provider/openaicompat` (OpenAI, Grok, Cerebras — text-only), `provider/gemini` (multimodal), `provider/gonka`, `provider/mock` |
+| `EmbeddingProvider` | **Optional** capability for text embeddings (`Name`, `SupportsEmbeddingModel`, `Embed`, `MaxBatchSize`). Discovered via type assertion at `NewRouter`, so chat-only providers are unaffected. | `provider/gemini` (text-embedding-004, gemini-embedding-001), `provider/mock` (mock.NewEmbed) |
 | `Policy` | Candidate sorting strategy | `policy.FreeFirstPolicy`, `policy.CostFirstPolicy` |
 | `QuotaStore` | Reserve/Commit/Rollback quota | `quota.MemoryQuotaStore`, `quota/redis.Store`, `quota/postgres.Store` |
 | `Meter` | Observability events | `meter.NoopMeter`, `meter.LogMeter` |

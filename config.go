@@ -49,6 +49,18 @@ type AccountConfig struct {
 	CostPerImageInputToken float64 `yaml:"cost_per_image_input_token"`
 	CostPerVideoInputToken float64 `yaml:"cost_per_video_input_token"`
 
+	// CostPerEmbeddingInputToken is the per-input-token cost for embedding
+	// operations on this account. Typically differs from CostPerInputToken —
+	// text-embedding-004 on Gemini costs ~$0.025/1M input tokens while chat
+	// models cost an order of magnitude more. Reusing CostPerInputToken for
+	// embeddings would inflate cost estimates and break free-first policy
+	// ordering for accounts that mix chat and embedding billing.
+	//
+	// Zero means this account does not support paid embeddings. Combined
+	// with DailyFree=0 this disables embeddings for the account entirely
+	// (router will skip it as an embed candidate).
+	CostPerEmbeddingInputToken float64 `yaml:"cost_per_embedding_input_token"`
+
 	// RPM is the default requests-per-minute limit for this account (0 = unlimited).
 	// Applied to all models unless overridden by ModelLimits.
 	RPM int `yaml:"rpm"`
@@ -130,6 +142,9 @@ func (c Config) Validate() error {
 		}
 		if acc.CostPerVideoInputToken < 0 {
 			return fmt.Errorf("inferrouter: config: account[%d] (%s): cost_per_video_input_token must be >= 0", i, acc.ID)
+		}
+		if acc.CostPerEmbeddingInputToken < 0 {
+			return fmt.Errorf("inferrouter: config: account[%d] (%s): cost_per_embedding_input_token must be >= 0", i, acc.ID)
 		}
 		if acc.RPM < 0 {
 			return fmt.Errorf("inferrouter: config: account[%d] (%s): rpm must be >= 0", i, acc.ID)

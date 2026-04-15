@@ -262,6 +262,72 @@ accounts:
 
 `LogMeter.OnResult` emits `text_tokens`, `audio_tokens`, `image_tokens`, `video_tokens`, and `cached_tokens` only when non-zero. Text-only providers (Cerebras, OpenAI) see zero diff in their log shape.
 
+## Embeddings
+
+Providers that support text embedding implement the optional `EmbeddingProvider` interface. The router discovers this capability via type assertion at `NewRouter` time — no config flag required. Currently supported: `provider/gemini` with `text-embedding-004` and `gemini-embedding-001`.
+
+```go
+resp, err := router.EmbedBatch(ctx, ir.EmbedRequest{
+    Model:    "text-embedding-004",
+    Inputs:   []string{"first chunk", "second chunk", "third chunk"},
+    TaskType: "RETRIEVAL_DOCUMENT", // RETRIEVAL_QUERY for queries
+})
+if err != nil {
+    return err
+}
+// resp.Embeddings[i] is the vector for req.Inputs[i]
+for i, vec := range resp.Embeddings {
+    store(inputs[i], vec)
+}
+```
+
+`EmbedBatch` automatically splits large input lists into sub-batches of at most `MaxBatchSize()` per the selected provider (Gemini = 100). On partial failure it returns `*ErrPartialBatch` alongside a valid prefix of embeddings, so consumers can checkpoint and resume:
+
+```go
+resp, err := router.EmbedBatch(ctx, req)
+var partial *ir.ErrPartialBatch
+if errors.As(err, &partial) {
+    persist(resp.Embeddings) // len == partial.ProcessedInputs
+    return retryWith(req.Inputs[partial.ProcessedInputs:])
+}
+```
+
+### Config
+
+Add a single-model alias per embedding model. **Cross-model fallback in embedding aliases is forbidden** — embedding vector spaces are not compatible between different models, so routing an index and a query to different models would silently corrupt retrieval quality. The router rejects such configs at `NewRouter` time with `ErrInvalidConfig`. Reliability should come from multiple accounts on the same model:
+
+```yaml
+models:
+  - alias: text-embedding-004
+    models:
+      - provider: gemini
+        model: text-embedding-004
+
+accounts:
+  - provider: gemini
+    id: gemini-free
+    auth: { api_key: "${GEMINI_FREE_KEY}" }
+    daily_free: 1500          # free tier RPM budget
+    quota_unit: requests
+    cost_per_embedding_input_token: 0 # free
+
+  - provider: gemini
+    id: gemini-paid
+    auth: { api_key: "${GEMINI_PAID_KEY}" }
+    paid_enabled: true
+    quota_unit: tokens
+    cost_per_embedding_input_token: 0.00000003  # $0.025 / 1M input (text-embedding-004)
+    max_daily_spend: 0.50
+```
+
+Free-first policy and circuit breaker work on the embedding path too: the router will try `gemini-free` first, fall back to `gemini-paid` on rate-limit or circuit breaker trip, and never cross into a different embedding model.
+
+If no provider implements `EmbeddingProvider` for the requested model, `EmbedBatch` returns `ErrNoEmbeddingProviders` — symmetric to `ErrMultimodalUnavailable` on the chat path.
+
+### Genkit consumers
+
+Inferrouter is a Go library. Consumers using [Genkit](https://firebase.google.com/docs/genkit) register models via `genkit.DefineModel` / `genkit.DefineEmbedder`. This library does not ship a Genkit-native `Embedder` adapter — consumers are responsible for wrapping `Router.EmbedBatch` in their own `DefineEmbedder` registration. See qarap's `pkg/inferrouterplugin/embed.go` as a reference implementation (if published).
+
 ## Quota Stores
 
 The default `MemoryQuotaStore` is in-memory and doesn't survive restarts. For production, use Redis or PostgreSQL.

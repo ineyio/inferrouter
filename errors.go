@@ -23,7 +23,59 @@ var (
 	// unhealthy). Not retryable with text-only fallback — callers should catch
 	// this explicitly and either degrade (strip media) or fail the request.
 	ErrMultimodalUnavailable = errors.New("inferrouter: no multimodal-capable candidates available")
+
+	// ErrNoEmbeddingProviders is returned by Router.Embed/EmbedBatch when no
+	// configured provider implements EmbeddingProvider for the requested model.
+	// Symmetric to ErrMultimodalUnavailable — a specific failure mode distinct
+	// from generic ErrNoCandidates.
+	ErrNoEmbeddingProviders = errors.New("inferrouter: no embedding providers for model")
+
+	// ErrBatchTooLarge is returned by Router.Embed (single-call path, NOT
+	// EmbedBatch) when len(req.Inputs) exceeds the selected provider's
+	// MaxBatchSize. Callers should use EmbedBatch for automatic splitting.
+	ErrBatchTooLarge = errors.New("inferrouter: batch exceeds provider max size")
+
+	// ErrInvalidConfig is returned by NewRouter for structural config problems
+	// that cannot be expressed via YAML schema alone (e.g. embedding alias
+	// with multiple models — see RFC §3.6 single-model invariant).
+	ErrInvalidConfig = errors.New("inferrouter: invalid config")
 )
+
+// ErrPartialBatch is returned by Router.EmbedBatch when the operation
+// successfully processed some inputs before encountering an unrecoverable
+// error on a later batch.
+//
+// Contract (critical for consumer correctness):
+//
+//   - ProcessedInputs is the exact count of successfully processed inputs
+//     from the start of req.Inputs. Ordering is preserved.
+//   - The accompanying EmbedResponse (returned via multi-return alongside
+//     this error) contains Embeddings[0..ProcessedInputs-1] — valid vectors
+//     for req.Inputs[0..ProcessedInputs-1], in original order.
+//   - Usage reflects actual tokens consumed on the successful part only.
+//   - Quota reservations for successful batches are COMMITTED; the failing
+//     batch's reservation is ROLLED BACK; unattempted remainder is not
+//     reserved. Consumer pays only for successful work.
+//
+// Consumer retry pattern:
+//
+//	resp, err := router.EmbedBatch(ctx, req)
+//	var partial *ErrPartialBatch
+//	if errors.As(err, &partial) {
+//	    persist(resp.Embeddings) // valid prefix
+//	    return retryWith(req.Inputs[partial.ProcessedInputs:])
+//	}
+type ErrPartialBatch struct {
+	ProcessedInputs int
+	Cause           error
+}
+
+func (e *ErrPartialBatch) Error() string {
+	return fmt.Sprintf("inferrouter: partial batch failure after %d inputs: %v",
+		e.ProcessedInputs, e.Cause)
+}
+
+func (e *ErrPartialBatch) Unwrap() error { return e.Cause }
 
 // CandidateError records the error from a single candidate attempt.
 type CandidateError struct {

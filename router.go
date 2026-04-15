@@ -18,6 +18,11 @@ type Router struct {
 	health      *HealthTracker
 	spend       *SpendTracker
 	rateLimiter *RateLimiter
+
+	// embedProviders is discovered at NewRouter via type-assertion: any
+	// Provider that also implements EmbeddingProvider is registered here.
+	// Chat-only providers are absent. See embed_router.go for use.
+	embedProviders map[string]EmbeddingProvider
 }
 
 // Option configures a Router.
@@ -71,17 +76,26 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 	}
 
 	provMap := make(map[string]Provider, len(providers))
+	embedProvMap := make(map[string]EmbeddingProvider)
 	for _, p := range providers {
 		provMap[p.Name()] = p
+		// Discover optional embedding capability via type-assertion.
+		// A Provider that also implements EmbeddingProvider is usable on
+		// both the chat and embed paths; the embed path uses a separate
+		// map so chat-only providers are not touched.
+		if ep, ok := p.(EmbeddingProvider); ok {
+			embedProvMap[ep.Name()] = ep
+		}
 	}
 
 	cfg.NormalizeCosts()
 
 	r := &Router{
-		cfg:       cfg,
-		providers: provMap,
-		health:    NewHealthTracker(),
-		spend:     NewSpendTracker(),
+		cfg:            cfg,
+		providers:      provMap,
+		embedProviders: embedProvMap,
+		health:         NewHealthTracker(),
+		spend:          NewSpendTracker(),
 	}
 
 	for _, opt := range opts {
@@ -123,6 +137,14 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 				}
 			}
 		}
+	}
+
+	// Enforce RFC §3.6 single-model invariant: aliases containing any
+	// embedding model reference must have exactly one entry. Cross-model
+	// fallback in embedding aliases is a RAG correctness bug (vector spaces
+	// are not compatible between models), fail-fast at startup.
+	if err := validateEmbeddingAliases(cfg, embedProvMap); err != nil {
+		return nil, err
 	}
 
 	return r, nil
