@@ -16,8 +16,17 @@ var _ inferrouter.EmbeddingProvider = (*Provider)(nil)
 // Known supported embedding models. Extending this set is safe — adding a new
 // model identifier does not change vector space compatibility (each model is
 // its own namespace per RFC §3.6).
+//
+// Verified against live Gemini API on 2026-04-15 via ListModels:
+//   - gemini-embedding-001: GA, native 3072 dims, supports outputDimensionality
+//     for Matryoshka truncation down to any [1..3072]
+//   - gemini-embedding-2-preview: preview, not recommended for production
+//
+// NOTE: text-embedding-004 was listed in the original VES RFC as the target
+// model but has been removed from v1beta as of 2026-04. It is intentionally
+// not in this whitelist — callers trying to use it will get an explicit
+// ErrNoEmbeddingProviders at router level rather than a late HTTP 404.
 var supportedEmbedModels = map[string]struct{}{
-	"text-embedding-004":   {},
 	"gemini-embedding-001": {},
 }
 
