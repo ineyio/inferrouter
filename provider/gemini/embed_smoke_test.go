@@ -229,5 +229,5 @@ func TestMain(m *testing.M) {
 		// Don't block CI; smoke tests opt-in via env.
 		fmt.Fprintln(os.Stderr, "note: GEMINI_API_KEY not set; smoke tests will skip")
 	}
-	m.Run()
+	os.Exit(m.Run())
 }
