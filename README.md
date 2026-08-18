@@ -1,10 +1,12 @@
 # inferrouter
 
-Smart LLM request router that maximizes free tier usage across multiple providers and accounts.
+LLM request router that walks an ordered ladder of endpoints: it tries them in the order you declared, skips the ones that are unhealthy or cannot serve the request, and reports which one answered.
 
 ## Why?
 
-Most LLM providers offer free tiers (Gemini 1500 RPD, Grok 5M tokens/day, etc.). By combining N accounts x M providers, you get significant free throughput. inferrouter automates the routing — picking free candidates first, falling back to paid when needed.
+A ladder is an ordered preference — "this model first, that gateway if it is down, this paid one as a last resort" — and the order usually encodes something the router cannot infer: quality, latency, which budget the traffic is allowed to touch. So the order you write is the order that runs. Nothing reorders it unless you ask for a policy, and the only steps that get skipped are ones that cannot serve the request at all.
+
+Free tiers still matter — several providers offer generous ones, and `FreeFirstPolicy` exists for pooling them. It is now something you opt into rather than a rule built into routing.
 
 ## Install
 
@@ -166,15 +168,31 @@ gemini.New()
 
 ## Routing Policies
 
-- **FreeFirstPolicy** (default): Free candidates first (most remaining quota), then paid (cheapest)
-- **CostFirstPolicy**: All candidates by cost ascending (free naturally first)
+By default there is no policy: candidates are attempted in the order the alias lists its steps, and within a step in the order the accounts are declared. A policy is a deliberate reordering, useful when the steps really are interchangeable:
+
+- **FreeFirstPolicy**: free candidates first (most remaining quota), then paid (cheapest)
+- **CostFirstPolicy**: all candidates by cost ascending
+- **LeastBusyPolicy**: fewest in-flight requests first — for a pool of equivalent gateways
 
 ```go
 import "github.com/ineyio/inferrouter/policy"
 
 ir.WithPolicy(&policy.FreeFirstPolicy{})
-ir.WithPolicy(&policy.CostFirstPolicy{})
+ir.WithPolicy(&policy.LeastBusyPolicy{})
 ```
+
+## Per-attempt time budget
+
+`AttemptTimeout` bounds one attempt rather than the whole walk, so a hung step cannot spend the budget its successors need. Set it globally or per account; zero means an attempt may use the caller's entire deadline.
+
+```yaml
+attempt_timeout: 60s
+accounts:
+  - id: slow-gateway
+    attempt_timeout: 120s   # this one is known to be slower
+```
+
+On the streaming path the budget covers opening the stream. Once the first chunk is on its way the generation runs on the caller's deadline alone — a slow answer from a healthy step is not a reason to move on.
 
 ## Streaming
 
@@ -320,7 +338,7 @@ accounts:
     max_daily_spend: 0.50
 ```
 
-Free-first policy and circuit breaker work on the embedding path too: the router will try `gemini-free` first, fall back to `gemini-paid` on rate-limit or circuit breaker trip, and never cross into a different embedding model.
+The embedding path follows the same rules: steps are attempted in declared order, the circuit breaker skips a tripped account, and an alias may never mix two different embedding models — several steps naming the *same* model are exactly the multi-account fallback you want.
 
 If no provider implements `EmbeddingProvider` for the requested model, `EmbedBatch` returns `ErrNoEmbeddingProviders` — symmetric to `ErrMultimodalUnavailable` on the chat path.
 
@@ -378,11 +396,11 @@ Durable quota state with transactional Reserve. Call `CleanupIdempotency(ctx, 24
 
 ## How It Works
 
-1. **Resolve model** — alias lookup or direct match
-2. **Build candidates** — Provider x Account x Model (filtered by SupportsModel); per-modality cost rates pre-resolved from account config
-3. **Filter** — remove unhealthy (circuit breaker), remove paid if AllowPaid=false, and (when request has media) drop providers whose SupportsMultimodal=false
-4. **Policy.Select** — order candidates by priority
-5. **Loop**: Reserve quota -> Execute -> Commit (success) / Rollback+next (failure)
+1. **Resolve model** — strict alias lookup; a name that is not a declared alias is `ErrUnknownAlias`, never an attempt against every provider
+2. **Build candidates** — for each step of the ladder, the accounts serving that step's provider, in declaration order; per-modality cost rates pre-resolved from account config
+3. **Filter** — remove unhealthy (circuit breaker), remove paid if AllowPaid=false, and (when request has media) drop providers whose SupportsMultimodal=false. Filtering skips steps; it never reorders them
+4. **Policy.Select** — only if a policy was configured
+5. **Loop**: Reserve quota -> Execute (under the attempt budget) -> Commit (success) / Rollback+next (failure)
 6. **Error classification**: fatal (400, 401) -> return immediately, retryable (429, 5xx) -> try next. Multimodal requests with no capable candidate return `ErrMultimodalUnavailable` instead of the generic `ErrNoCandidates`.
 
 ## License
