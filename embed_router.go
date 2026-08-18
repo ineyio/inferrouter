@@ -40,10 +40,11 @@ func validateEmbeddingAliases(cfg Config, embedProviders map[string]EmbeddingPro
 	return nil
 }
 
-// prepareEmbedRoute builds, filters, and orders embedding candidates.
-// Symmetric to prepareRoute for chat, but uses EmbeddingProvider capability
-// and simpler free-first ordering (inline — no separate Policy type for
-// embeddings in Phase 1).
+// prepareEmbedRoute builds and filters embedding candidates.
+// Symmetric to prepareRoute for chat: config order is the attempt order (R1),
+// so accounts are tried as the alias and cfg.Accounts declare them. Embeddings
+// have no pluggable Policy — if deliberate reordering is ever needed here,
+// parallel the chat Policy interface at that point.
 func (r *Router) prepareEmbedRoute(ctx context.Context, requestModel string) ([]EmbedCandidate, error) {
 	candidates := buildEmbedCandidates(ctx, r.cfg, r.embedProviders, r.quotaStore, r.health, r.spend, requestModel)
 	candidates = filterEmbedCandidates(candidates, r.cfg.AllowPaid)
@@ -51,19 +52,7 @@ func (r *Router) prepareEmbedRoute(ctx context.Context, requestModel string) ([]
 		return nil, ErrNoEmbeddingProviders
 	}
 
-	// Free-first inline ordering. Embedding path does not currently have
-	// a pluggable Policy — if custom ordering is needed, parallel the chat
-	// Policy interface at that point.
-	free := candidates[:0:0]
-	paid := make([]EmbedCandidate, 0, len(candidates))
-	for _, c := range candidates {
-		if c.Free {
-			free = append(free, c)
-		} else {
-			paid = append(paid, c)
-		}
-	}
-	return append(free, paid...), nil
+	return candidates, nil
 }
 
 // acquireEmbed attempts RPM check and quota reservation for an embed candidate.

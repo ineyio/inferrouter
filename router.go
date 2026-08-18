@@ -105,9 +105,11 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 	}
 
 	// Apply defaults after options.
-	if r.policy == nil {
-		r.policy = &defaultFreeFirstPolicy{}
-	}
+	//
+	// No default policy: without an explicit WithPolicy the router attempts
+	// candidates in the order the config declares them. A policy is a
+	// deliberate reordering (free-first, cheapest-first, least-busy), never
+	// something the caller gets without asking.
 	if r.quotaStore == nil {
 		r.quotaStore = &noopQuotaStore{}
 	}
@@ -171,6 +173,10 @@ func (r *Router) prepareRoute(ctx context.Context, requestModel string, needMult
 		return nil, ErrNoCandidates
 	}
 
+	// No policy configured — config order is the attempt order (R1).
+	if r.policy == nil {
+		return candidates, nil
+	}
 	return r.policy.Select(candidates), nil
 }
 
@@ -431,21 +437,6 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 	}
 
 	return nil, allFailedError(tried, len(ordered))
-}
-
-// defaultFreeFirstPolicy is an inline free-first policy to avoid import cycles.
-type defaultFreeFirstPolicy struct{}
-
-func (p *defaultFreeFirstPolicy) Select(candidates []Candidate) []Candidate {
-	var free, paid []Candidate
-	for _, c := range candidates {
-		if c.Free {
-			free = append(free, c)
-		} else {
-			paid = append(paid, c)
-		}
-	}
-	return append(free, paid...)
 }
 
 // noopQuotaStore is a quota store that allows everything (no limits).
