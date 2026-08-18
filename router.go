@@ -24,6 +24,22 @@ type Router struct {
 	// Provider that also implements EmbeddingProvider is registered here.
 	// Chat-only providers are absent. See embed_router.go for use.
 	embedProviders map[string]EmbeddingProvider
+
+	// configWarnings records accepted-but-surprising configuration, surfaced
+	// through ConfigWarnings(). See that method.
+	configWarnings []string
+}
+
+// ConfigWarnings returns non-fatal observations about the configuration the
+// router was built with: settings that are legal and accepted, but will not do
+// what a reader might assume. The library has no logger of its own, so these
+// are returned as data — consumers should log them once at startup.
+//
+// The important case is a spend cap that cannot bind: max_daily_spend on an
+// account with no known price reads like a budget guarantee and enforces
+// nothing, because every request costs a computed zero.
+func (r *Router) ConfigWarnings() []string {
+	return append([]string(nil), r.configWarnings...)
 }
 
 // Option configures a Router.
@@ -133,15 +149,24 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 	}
 
 	// Initialize quota limits from config if the store supports it.
+	//
+	// Only accounts that declare a free allowance get a local quota. An
+	// account without one is not "an account with a zero budget" — it is an
+	// account whose limits live at the provider, which reports them by
+	// answering 429. Registering a zero quota for it used to make it a
+	// candidate that could never reserve: dead, and silently so.
 	if init, ok := r.quotaStore.(QuotaInitializer); ok {
 		for _, acc := range cfg.Accounts {
-			if acc.DailyFree > 0 || !acc.PaidEnabled {
-				if err := init.SetQuota(acc.ID, acc.DailyFree, acc.QuotaUnit); err != nil {
-					return nil, fmt.Errorf("inferrouter: init quota for %q: %w", acc.ID, err)
-				}
+			if acc.DailyFree <= 0 {
+				continue
+			}
+			if err := init.SetQuota(acc.ID, acc.DailyFree, acc.QuotaUnit); err != nil {
+				return nil, fmt.Errorf("inferrouter: init quota for %q: %w", acc.ID, err)
 			}
 		}
 	}
+
+	r.configWarnings = collectConfigWarnings(cfg)
 
 	// Enforce RFC §3.6 single-model invariant: aliases containing any
 	// embedding model reference must have exactly one entry. Cross-model
@@ -437,6 +462,32 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 	}
 
 	return nil, allFailedError(tried, len(ordered))
+}
+
+// collectConfigWarnings reports configuration that is accepted but does less
+// than it appears to. A missing price is a normal state — plenty of endpoints
+// bill without publishing a rate — so it is not an error; it does mean spend
+// for that account cannot be measured, and anything built on that measurement
+// silently does nothing.
+func collectConfigWarnings(cfg Config) []string {
+	var warnings []string
+	for _, acc := range cfg.Accounts {
+		hasCost := acc.CostPerToken > 0 || acc.CostPerInputToken > 0 || acc.CostPerOutputToken > 0
+		if hasCost {
+			continue
+		}
+		switch {
+		case acc.MaxDailySpend > 0:
+			warnings = append(warnings, fmt.Sprintf(
+				"account %q: max_daily_spend is set but no cost rate is configured — "+
+					"spend computes to zero, so the cap can never trigger", acc.ID))
+		case acc.PaidEnabled:
+			warnings = append(warnings, fmt.Sprintf(
+				"account %q: paid_enabled without a cost rate — requests are routed "+
+					"normally but their spend is not tracked", acc.ID))
+		}
+	}
+	return warnings
 }
 
 // noopQuotaStore is a quota store that allows everything (no limits).

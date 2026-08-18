@@ -65,10 +65,9 @@ func servingStep(log *attemptLog, name string) *mock.Provider {
 // The LAST account is the free one: under free-first ordering it would jump to
 // the head of the queue, which is exactly what must not happen.
 //
-// Paid accounts carry PaidEnabled + a cost because today's library refuses to
-// start otherwise, and a paid account without PaidEnabled gets a zero daily
-// quota and dies at Reserve (RFC §3.2). Step 3 lifts both constraints; this
-// helper gets simpler then.
+// The paid steps declare no price — a billable account without a published
+// rate is a supported state, and one of the shapes this ordering has to work
+// for.
 func ladderConfig(stepNames ...string) ir.Config {
 	accounts := make([]ir.AccountConfig, 0, len(stepNames))
 	refs := make([]ir.ModelRef, 0, len(stepNames))
@@ -82,8 +81,6 @@ func ladderConfig(stepNames ...string) ir.Config {
 			acc.DailyFree = 1000
 		} else {
 			acc.PaidEnabled = true
-			acc.CostPerInputToken = 0.001
-			acc.CostPerOutputToken = 0.001
 		}
 		accounts = append(accounts, acc)
 		refs = append(refs, ir.ModelRef{Provider: name, Model: "ladder-model"})

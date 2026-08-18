@@ -125,14 +125,16 @@ func TestConfigValidateRequiresQuotaUnit(t *testing.T) {
 	}
 }
 
-func TestConfigValidatePaidEnabledRequiresCost(t *testing.T) {
+func TestConfigValidatePaidEnabledWithoutCostIsValid(t *testing.T) {
+	// A billable account whose price is not published is a normal state, not a
+	// configuration error: two of our three Gonka gateways publish no rate. The
+	// consequence (spend is not tracked) is reported by Router.ConfigWarnings.
 	acc := validAccount()
 	acc.PaidEnabled = true
 	// No cost configured.
 	cfg := Config{Accounts: []AccountConfig{acc}}
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "paid_enabled") {
-		t.Errorf("expected paid_enabled error, got: %v", err)
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("paid account without a price must validate, got: %v", err)
 	}
 }
 

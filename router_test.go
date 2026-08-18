@@ -102,7 +102,11 @@ func TestPaidFallback_WhenFreeExhausted(t *testing.T) {
 		AllowPaid:    true,
 		DefaultModel: "test-model",
 		Accounts: []ir.AccountConfig{
-			{Provider: "mock", ID: "free-1", DailyFree: 0, QuotaUnit: ir.QuotaTokens},
+			// A one-token allowance the request cannot fit into: genuine
+			// exhaustion at Reserve. (This used to say DailyFree: 0, which
+			// only "worked" because a zero quota made the account
+			// unreservable — the silent-death bug Step 3 removes.)
+			{Provider: "mock", ID: "free-1", DailyFree: 1, QuotaUnit: ir.QuotaTokens},
 			{Provider: "mock", ID: "paid-1", DailyFree: 0, QuotaUnit: ir.QuotaTokens, PaidEnabled: true, CostPerToken: 0.001},
 		},
 	}
@@ -532,15 +536,6 @@ func TestConfigValidation_NegativeValues(t *testing.T) {
 				},
 			},
 			errContains: "cost_per_output_token must be >= 0",
-		},
-		{
-			name: "paid_enabled without cost",
-			cfg: ir.Config{
-				Accounts: []ir.AccountConfig{
-					{Provider: "mock", ID: "a", PaidEnabled: true, QuotaUnit: ir.QuotaTokens},
-				},
-			},
-			errContains: "paid_enabled requires cost configuration",
 		},
 	}
 

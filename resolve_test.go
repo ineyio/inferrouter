@@ -206,7 +206,6 @@ func TestErrorTaxonomyContract(t *testing.T) {
 		cfg := ladderConfig("step-one", "step-two")
 		cfg.Accounts[1].DailyFree = 0 // both steps paid so both are attempted
 		cfg.Accounts[1].PaidEnabled = true
-		cfg.Accounts[1].CostPerInputToken = 0.001
 
 		r, err := ir.NewRouter(cfg,
 			[]ir.Provider{failingStep(log, "step-one"), failingStep(log, "step-two")},
