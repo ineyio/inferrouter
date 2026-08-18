@@ -18,10 +18,29 @@ type RouterStream struct {
 	spend       *SpendTracker
 	inflight    *InflightTracker // nil-safe; decremented once on Close
 	candidate   Candidate
+	attempts    int
 	startTime   time.Time
 	totalUsage  Usage
 	closed      bool
 	streamErr   error // first error encountered during streaming
+
+	// cancel releases the context the provider request was opened with. It is
+	// held for the life of the stream and called on Close — cancelling it any
+	// earlier would tear down the response body mid-generation.
+	cancel context.CancelFunc
+}
+
+// Routing reports which step of the ladder opened this stream. The unary path
+// returns the same information on ChatResponse; without it here, callers were
+// left inferring the provider from chunk metadata after the fact.
+func (s *RouterStream) Routing() RoutingInfo {
+	return RoutingInfo{
+		Provider:  s.candidate.Provider.Name(),
+		AccountID: s.candidate.AccountID,
+		Model:     s.candidate.Model,
+		Attempts:  s.attempts,
+		Free:      s.candidate.Free,
+	}
 }
 
 // Next returns the next chunk from the stream.
@@ -48,6 +67,10 @@ func (s *RouterStream) Close() error {
 		return nil
 	}
 	s.closed = true
+
+	if s.cancel != nil {
+		defer s.cancel()
+	}
 
 	if s.inflight != nil {
 		s.inflight.Dec(s.candidate.AccountID)

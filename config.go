@@ -3,6 +3,7 @@ package inferrouter
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -13,6 +14,13 @@ type Config struct {
 	DefaultModel string          `yaml:"default_model"`
 	Models       []ModelMapping  `yaml:"models"`
 	Accounts     []AccountConfig `yaml:"accounts"`
+
+	// AttemptTimeout bounds a single attempt, not the whole walk down the
+	// ladder. Zero means every attempt may use the caller's entire budget —
+	// which is how a ladder degenerates into a single step: one hung provider
+	// consumes the caller's deadline and the remaining steps never get a
+	// chance. Individual accounts may override it.
+	AttemptTimeout time.Duration `yaml:"attempt_timeout"`
 }
 
 // ModelMapping defines a model alias.
@@ -41,6 +49,10 @@ type AccountConfig struct {
 
 	DailyFree int64     `yaml:"daily_free"`
 	QuotaUnit QuotaUnit `yaml:"quota_unit"`
+
+	// AttemptTimeout overrides Config.AttemptTimeout for this account. Useful
+	// when one step is known to be much slower than its neighbours.
+	AttemptTimeout time.Duration `yaml:"attempt_timeout"`
 
 	// PaidEnabled marks the account as billable. It is metadata for
 	// observability and for the optional policies — it does not gate routing,

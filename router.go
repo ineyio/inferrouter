@@ -330,6 +330,21 @@ func buildProviderRequest(c Candidate, req ChatRequest, stream, hasMedia bool) P
 	}
 }
 
+// attemptBudget returns the time budget for one attempt against c: the
+// account's own override, else the global setting, else zero for "no separate
+// budget — use the caller's".
+func (r *Router) attemptBudget(c Candidate) time.Duration {
+	for _, acc := range r.cfg.Accounts {
+		if acc.ID == c.AccountID {
+			if acc.AttemptTimeout > 0 {
+				return acc.AttemptTimeout
+			}
+			break
+		}
+	}
+	return r.cfg.AttemptTimeout
+}
+
 func allFailedError(tried []CandidateError, total int) error {
 	if len(tried) > 0 {
 		return &RouterError{
@@ -355,6 +370,14 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 
 	var tried []CandidateError
 	for attempt, c := range ordered {
+		// The caller's budget is gone: further steps have nothing to run in.
+		// Walking them anyway produces a list of identical context errors, and
+		// against a provider that ignores its context it can even report a
+		// success the caller is no longer waiting for.
+		if err := ctx.Err(); err != nil {
+			return ChatResponse{}, err
+		}
+
 		reservation, skip := r.acquire(ctx, c, estimatedTokens)
 		if skip != nil {
 			tried = append(tried, *skip)
@@ -370,11 +393,17 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 			EstimatedIn: estimatedTokens,
 		})
 
+		attemptCtx, cancel := ctx, context.CancelFunc(func() {})
+		if budget := r.attemptBudget(c); budget > 0 {
+			attemptCtx, cancel = context.WithTimeout(ctx, budget)
+		}
+
 		r.inflight.Inc(c.AccountID)
 		start := time.Now()
-		resp, err := c.Provider.ChatCompletion(ctx, buildProviderRequest(c, req, false, hasMedia))
+		resp, err := c.Provider.ChatCompletion(attemptCtx, buildProviderRequest(c, req, false, hasMedia))
 		duration := time.Since(start)
 		r.inflight.Dec(c.AccountID)
+		cancel()
 
 		if err != nil {
 			fatal, ce := r.settleFailure(ctx, c, reservation, err, duration, attempt)
@@ -421,6 +450,10 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 
 	var tried []CandidateError
 	for attempt, c := range ordered {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		reservation, skip := r.acquire(ctx, c, estimatedTokens)
 		if skip != nil {
 			tried = append(tried, *skip)
@@ -436,10 +469,26 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 			EstimatedIn: estimatedTokens,
 		})
 
+		// The per-attempt budget covers opening the stream, not the generation
+		// that follows: a slow answer from a healthy step is not a reason to
+		// move on, and killing it mid-token would be the opposite of what the
+		// budget is for. So the attempt runs under a plain cancellable context
+		// with a watchdog; once the stream is open the watchdog is disarmed and
+		// the stream lives on the caller's deadline alone.
+		attemptCtx, cancel := context.WithCancel(ctx)
+		var watchdog *time.Timer
+		if budget := r.attemptBudget(c); budget > 0 {
+			watchdog = time.AfterFunc(budget, cancel)
+		}
+
 		r.inflight.Inc(c.AccountID)
-		stream, err := c.Provider.ChatCompletionStream(ctx, buildProviderRequest(c, req, true, hasMedia))
+		stream, err := c.Provider.ChatCompletionStream(attemptCtx, buildProviderRequest(c, req, true, hasMedia))
+		if watchdog != nil {
+			watchdog.Stop()
+		}
 		if err != nil {
 			r.inflight.Dec(c.AccountID)
+			cancel()
 			fatal, ce := r.settleFailure(ctx, c, reservation, err, 0, attempt)
 			if fatal != nil {
 				return nil, fatal
@@ -457,6 +506,8 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 			spend:       r.spend,
 			inflight:    r.inflight,
 			candidate:   c,
+			attempts:    attempt + 1,
+			cancel:      cancel,
 			startTime:   time.Now(),
 		}, nil
 	}
