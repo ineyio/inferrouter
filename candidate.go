@@ -29,6 +29,7 @@ func buildCandidates(
 	quotaStore QuotaStore,
 	health *HealthTracker,
 	spend *SpendTracker,
+	inflight *InflightTracker,
 	requestModel string,
 ) ([]Candidate, error) {
 	refs := resolveModel(cfg, requestModel)
@@ -57,6 +58,7 @@ func buildCandidates(
 				Remaining:              remaining,
 				QuotaUnit:              acc.QuotaUnit,
 				Health:                 health.GetHealth(acc.ID),
+				Inflight:               inflight.Get(acc.ID),
 				CostPerToken:           acc.CostPerToken,
 				CostPerInputToken:      acc.CostPerInputToken,
 				CostPerOutputToken:     acc.CostPerOutputToken,

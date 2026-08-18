@@ -16,6 +16,7 @@ type RouterStream struct {
 	meter       Meter
 	health      *HealthTracker
 	spend       *SpendTracker
+	inflight    *InflightTracker // nil-safe; decremented once on Close
 	candidate   Candidate
 	startTime   time.Time
 	totalUsage  Usage
@@ -47,6 +48,10 @@ func (s *RouterStream) Close() error {
 		return nil
 	}
 	s.closed = true
+
+	if s.inflight != nil {
+		s.inflight.Dec(s.candidate.AccountID)
+	}
 
 	err := s.inner.Close()
 	duration := time.Since(s.startTime)

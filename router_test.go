@@ -354,6 +354,64 @@ func TestQuotaAutoInit_FromConfig(t *testing.T) {
 	assert.Equal(t, int64(499), remaining) // 500 - 1 request
 }
 
+// Test: LeastBusyPolicy spreads concurrent requests across a gateway pool
+func TestLeastBusySpreadsConcurrentRequests(t *testing.T) {
+	// Two gateways, two concurrent requests. The second request is launched
+	// only after the first is inside its provider call, so LeastBusyPolicy
+	// must see inflight=1 on the first gateway and route to the other one.
+	block := make(chan struct{})
+	started := make(chan string, 2)
+	mkProvider := func(name string) *mock.Provider {
+		return mock.New(
+			mock.WithName(name),
+			mock.WithModels("m"),
+			mock.WithResponseFunc(func(ir.ProviderRequest) (ir.ProviderResponse, error) {
+				started <- name
+				<-block
+				return ir.ProviderResponse{Content: "ok", Usage: ir.Usage{TotalTokens: 10}}, nil
+			}),
+		)
+	}
+	gw1, gw2 := mkProvider("gw1"), mkProvider("gw2")
+
+	cfg := ir.Config{
+		DefaultModel: "m",
+		Accounts: []ir.AccountConfig{
+			{Provider: "gw1", ID: "acc-gw1", QuotaUnit: ir.QuotaTokens, DailyFree: 100000},
+			{Provider: "gw2", ID: "acc-gw2", QuotaUnit: ir.QuotaTokens, DailyFree: 100000},
+		},
+	}
+	router, err := ir.NewRouter(cfg, []ir.Provider{gw1, gw2},
+		ir.WithQuotaStore(quota.NewMemoryQuotaStore()),
+		ir.WithPolicy(&policy.LeastBusyPolicy{}),
+	)
+	require.NoError(t, err)
+
+	req := ir.ChatRequest{Messages: []ir.Message{{Role: "user", Content: "hi"}}}
+	var wg sync.WaitGroup
+	launch := func() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := router.ChatCompletion(context.Background(), req)
+			if !assert.NoError(t, err) {
+				started <- "router-error" // unblock the receive below so the test fails instead of hanging
+			}
+		}()
+	}
+
+	launch()
+	first := <-started
+	launch()
+	second := <-started
+	close(block)
+	wg.Wait()
+
+	assert.NotEqual(t, first, second, "second concurrent request must route to the idle gateway")
+	assert.Equal(t, int64(1), gw1.CallCount())
+	assert.Equal(t, int64(1), gw2.CallCount())
+}
+
 // Test: EstimateTokens
 func TestEstimateTokens(t *testing.T) {
 	msgs := []ir.Message{

@@ -92,6 +92,63 @@ func TestFreeFirstDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestLeastBusyPrefersFewestInflight(t *testing.T) {
+	p := &LeastBusyPolicy{}
+	in := []ir.Candidate{
+		{AccountID: "busy", Free: true, Remaining: 500, Inflight: 3},
+		{AccountID: "idle", Free: true, Remaining: 100, Inflight: 0},
+		{AccountID: "mid", Free: true, Remaining: 300, Inflight: 1},
+	}
+	got := ids(p.Select(in))
+	want := []string{"idle", "mid", "busy"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("pos %d: got %q, want %q (full=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestLeastBusyFreeBeforePaidRegardlessOfLoad(t *testing.T) {
+	p := &LeastBusyPolicy{}
+	in := []ir.Candidate{
+		{AccountID: "paid-idle", Free: false, CostPerToken: 0.001, Inflight: 0},
+		{AccountID: "free-busy", Free: true, Remaining: 10, Inflight: 5},
+	}
+	got := ids(p.Select(in))
+	if got[0] != "free-busy" {
+		t.Errorf("got %v, want free candidate first even when busy", got)
+	}
+}
+
+func TestLeastBusyTiesFallBackToRemainingAndCost(t *testing.T) {
+	p := &LeastBusyPolicy{}
+	in := []ir.Candidate{
+		{AccountID: "free-low", Free: true, Remaining: 10, Inflight: 1},
+		{AccountID: "free-high", Free: true, Remaining: 500, Inflight: 1},
+		{AccountID: "paid-exp", Free: false, CostPerToken: 0.01, Inflight: 2},
+		{AccountID: "paid-cheap", Free: false, CostPerToken: 0.0001, Inflight: 2},
+	}
+	got := ids(p.Select(in))
+	want := []string{"free-high", "free-low", "paid-cheap", "paid-exp"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("pos %d: got %q, want %q (full=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestLeastBusyDoesNotMutateInput(t *testing.T) {
+	p := &LeastBusyPolicy{}
+	in := []ir.Candidate{
+		{AccountID: "busy", Free: true, Inflight: 9},
+		{AccountID: "idle", Free: true, Inflight: 0},
+	}
+	_ = p.Select(in)
+	if in[0].AccountID != "busy" || in[1].AccountID != "idle" {
+		t.Errorf("input mutated: %v", ids(in))
+	}
+}
+
 func TestCostFirstOrdersByCost(t *testing.T) {
 	p := &CostFirstPolicy{}
 	in := []ir.Candidate{
@@ -131,5 +188,8 @@ func TestEmptyInput(t *testing.T) {
 	}
 	if got := (&CostFirstPolicy{}).Select(nil); len(got) != 0 {
 		t.Errorf("CostFirst on nil = %v", got)
+	}
+	if got := (&LeastBusyPolicy{}).Select(nil); len(got) != 0 {
+		t.Errorf("LeastBusy on nil = %v", got)
 	}
 }

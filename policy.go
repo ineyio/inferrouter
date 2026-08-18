@@ -17,6 +17,12 @@ type Candidate struct {
 	QuotaUnit QuotaUnit // unit of the quota
 	Health    HealthState
 
+	// Inflight is the number of requests currently executing against this
+	// account. Populated from the router's InflightTracker; used by
+	// load-aware policies (policy.LeastBusyPolicy) to spread concurrent
+	// requests across a pool of slow gateways.
+	Inflight int64
+
 	// Deprecated: use CostPerInputToken/CostPerOutputToken.
 	CostPerToken float64
 

@@ -1,6 +1,8 @@
 package inferrouter
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -11,6 +13,39 @@ func validAccount() AccountConfig {
 		ID:        "mock-acc",
 		QuotaUnit: QuotaTokens,
 		DailyFree: 1000,
+	}
+}
+
+func TestLoadConfigParsesBaseURL(t *testing.T) {
+	yamlCfg := `
+default_model: qwen/qwen3-235b-a22b-instruct-2507-fp8
+accounts:
+  - provider: gonkagate
+    id: gonkagate-main
+    base_url: https://api.gonkagate.com/v1
+    auth:
+      api_key: gp-test
+    quota_unit: tokens
+    daily_free: 1000
+  - provider: codeprov
+    id: code-constructed
+    quota_unit: tokens
+    daily_free: 1000
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yamlCfg), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Accounts[0].BaseURL; got != "https://api.gonkagate.com/v1" {
+		t.Errorf("BaseURL = %q, want gonkagate endpoint", got)
+	}
+	if got := cfg.Accounts[1].BaseURL; got != "" {
+		t.Errorf("BaseURL = %q, want empty for code-constructed provider", got)
 	}
 }
 

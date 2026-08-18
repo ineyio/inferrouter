@@ -15,8 +15,12 @@ import (
 
 func TestSupportsEmbeddingModel(t *testing.T) {
 	p := New()
-	if !p.SupportsEmbeddingModel("text-embedding-004") {
-		t.Error("should accept text-embedding-004")
+	// text-embedding-004 was removed from v1beta in 2026-04 and is
+	// intentionally absent from the whitelist (see NOTE in embed.go) —
+	// rejecting it surfaces ErrNoEmbeddingProviders at router level
+	// instead of a late HTTP 404.
+	if p.SupportsEmbeddingModel("text-embedding-004") {
+		t.Error("should reject text-embedding-004 (removed from v1beta 2026-04)")
 	}
 	if !p.SupportsEmbeddingModel("gemini-embedding-001") {
 		t.Error("should accept gemini-embedding-001")

@@ -29,9 +29,16 @@ type ModelRef struct {
 
 // AccountConfig configures a single provider account.
 type AccountConfig struct {
-	Provider      string    `yaml:"provider"`
-	ID            string    `yaml:"id"`
-	Auth          Auth      `yaml:"auth"`
+	Provider string `yaml:"provider"`
+	ID       string `yaml:"id"`
+	Auth     Auth   `yaml:"auth"`
+
+	// BaseURL is the OpenAI-compatible endpoint for this account's provider
+	// (e.g. "https://api.gonkagate.com/v1"). Consumed by
+	// openaicompat.FromAccounts to build the provider pool straight from
+	// config; empty means the provider is constructed in code.
+	BaseURL string `yaml:"base_url"`
+
 	DailyFree     int64     `yaml:"daily_free"`
 	QuotaUnit     QuotaUnit `yaml:"quota_unit"`
 	PaidEnabled   bool      `yaml:"paid_enabled"`

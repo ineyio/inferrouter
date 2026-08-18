@@ -18,6 +18,7 @@ type Router struct {
 	health      *HealthTracker
 	spend       *SpendTracker
 	rateLimiter *RateLimiter
+	inflight    *InflightTracker
 
 	// embedProviders is discovered at NewRouter via type-assertion: any
 	// Provider that also implements EmbeddingProvider is registered here.
@@ -96,6 +97,7 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 		embedProviders: embedProvMap,
 		health:         NewHealthTracker(),
 		spend:          NewSpendTracker(),
+		inflight:       NewInflightTracker(),
 	}
 
 	for _, opt := range opts {
@@ -156,7 +158,7 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 // When needMultimodal is true and the filter empties the list, the more
 // specific ErrMultimodalUnavailable is returned instead of ErrNoCandidates.
 func (r *Router) prepareRoute(ctx context.Context, requestModel string, needMultimodal bool) ([]Candidate, error) {
-	candidates, err := buildCandidates(ctx, r.cfg, r.providers, r.quotaStore, r.health, r.spend, requestModel)
+	candidates, err := buildCandidates(ctx, r.cfg, r.providers, r.quotaStore, r.health, r.spend, r.inflight, requestModel)
 	if err != nil {
 		return nil, err
 	}
@@ -337,9 +339,11 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 			EstimatedIn: estimatedTokens,
 		})
 
+		r.inflight.Inc(c.AccountID)
 		start := time.Now()
 		resp, err := c.Provider.ChatCompletion(ctx, buildProviderRequest(c, req, false, hasMedia))
 		duration := time.Since(start)
+		r.inflight.Dec(c.AccountID)
 
 		if err != nil {
 			fatal, ce := r.settleFailure(ctx, c, reservation, err, duration, attempt)
@@ -401,8 +405,10 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 			EstimatedIn: estimatedTokens,
 		})
 
+		r.inflight.Inc(c.AccountID)
 		stream, err := c.Provider.ChatCompletionStream(ctx, buildProviderRequest(c, req, true, hasMedia))
 		if err != nil {
+			r.inflight.Dec(c.AccountID)
 			fatal, ce := r.settleFailure(ctx, c, reservation, err, 0, attempt)
 			if fatal != nil {
 				return nil, fatal
@@ -418,6 +424,7 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 			meter:       r.meter,
 			health:      r.health,
 			spend:       r.spend,
+			inflight:    r.inflight,
 			candidate:   c,
 			startTime:   time.Now(),
 		}, nil

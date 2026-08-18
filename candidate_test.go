@@ -153,6 +153,7 @@ func TestBuildCandidatesResolvesModalityCostFallback(t *testing.T) {
 		&noopQuotaStore{},
 		NewHealthTracker(),
 		NewSpendTracker(),
+		NewInflightTracker(),
 		"gemini-2.5-flash-lite",
 	)
 	if err != nil {
@@ -197,6 +198,7 @@ func TestBuildCandidatesExplicitModalityRatesWin(t *testing.T) {
 		&noopQuotaStore{},
 		NewHealthTracker(),
 		NewSpendTracker(),
+		NewInflightTracker(),
 		"gemini-2.5-flash-lite",
 	)
 	if err != nil {

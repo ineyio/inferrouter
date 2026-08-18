@@ -62,7 +62,7 @@ Fatal errors (`ErrAuthFailed`, `ErrInvalidRequest`) stop the loop immediately. R
 |-----------|---------|----------------|
 | `Provider` | LLM API adapter (`Name`, `SupportsModel`, `SupportsMultimodal`, `ChatCompletion`, `ChatCompletionStream`) | `provider/openaicompat` (OpenAI, Grok, Cerebras — text-only), `provider/gemini` (multimodal), `provider/gonka`, `provider/mock` |
 | `EmbeddingProvider` | **Optional** capability for text embeddings (`Name`, `SupportsEmbeddingModel`, `Embed`, `MaxBatchSize`). Discovered via type assertion at `NewRouter`, so chat-only providers are unaffected. | `provider/gemini` (text-embedding-004, gemini-embedding-001), `provider/mock` (mock.NewEmbed) |
-| `Policy` | Candidate sorting strategy | `policy.FreeFirstPolicy`, `policy.CostFirstPolicy` |
+| `Policy` | Candidate sorting strategy | `policy.FreeFirstPolicy`, `policy.CostFirstPolicy`, `policy.LeastBusyPolicy` (fewest in-flight first — spreads concurrent requests across slow gateway pools; fed by the router's `InflightTracker`) |
 | `QuotaStore` | Reserve/Commit/Rollback quota | `quota.MemoryQuotaStore`, `quota/redis.Store`, `quota/postgres.Store` |
 | `Meter` | Observability events | `meter.NoopMeter`, `meter.LogMeter` |
 
@@ -86,6 +86,8 @@ Fatal errors (`ErrAuthFailed`, `ErrInvalidRequest`) stop the loop immediately. R
 ### Config
 
 YAML with `${ENV_VAR}` expansion. Defines accounts (provider, auth, daily free quota, cost), model aliases (map alias → list of provider/model pairs), and global settings (AllowPaid, DefaultModel).
+
+**Gateway pools**: `AccountConfig.BaseURL` (`base_url` in YAML) declares an OpenAI-compatible endpoint per account; `openaicompat.FromAccounts(cfg.Accounts)` builds one provider per distinct provider name from those entries — a pool of gateways (e.g. Gonka resellers like GonkaGate) is pure config, no code per gateway. Combine with `policy.LeastBusyPolicy` so concurrent requests spread across the pool instead of funneling into the first candidate. In-flight counts are process-local and best-effort: a simultaneous burst may cluster its first wave before any counter increments. See `examples/gateway-pool/`.
 
 ## Conventions
 
