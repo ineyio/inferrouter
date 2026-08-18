@@ -50,17 +50,20 @@ func buildEmbedCandidates(
 	health *HealthTracker,
 	spend *SpendTracker,
 	requestModel string,
-) []EmbedCandidate {
-	refs := resolveModel(cfg, requestModel)
-	var candidates []EmbedCandidate
+) ([]EmbedCandidate, error) {
+	refs, err := resolveModel(cfg, requestModel)
+	if err != nil {
+		return nil, err
+	}
 
+	var candidates []EmbedCandidate
 	for _, acc := range cfg.Accounts {
 		prov, ok := embedProviders[acc.Provider]
 		if !ok {
 			continue // provider does not implement EmbeddingProvider
 		}
 
-		models := embedModelsForAccount(refs, acc, prov, requestModel, cfg)
+		models := embedModelsForAccount(refs, acc, prov)
 		for _, model := range models {
 			// Account must have either free quota or a non-zero embedding cost
 			// to be a valid candidate. Zero-cost paid accounts are explicitly
@@ -89,32 +92,20 @@ func buildEmbedCandidates(
 		}
 	}
 
-	return candidates
+	return candidates, nil
 }
 
 // embedModelsForAccount returns the embedding models to try for a given
-// account. Mirrors modelsForAccount but checks SupportsEmbeddingModel instead
-// of SupportsModel.
-func embedModelsForAccount(refs []ModelRef, acc AccountConfig, prov EmbeddingProvider, requestModel string, cfg Config) []string {
-	if len(refs) > 0 {
-		var models []string
-		for _, ref := range refs {
-			if ref.Provider == acc.Provider && prov.SupportsEmbeddingModel(ref.Model) {
-				models = append(models, ref.Model)
-			}
+// account: the steps of the resolved ladder that this account serves and the
+// provider actually supports as an embedding model.
+func embedModelsForAccount(refs []ModelRef, acc AccountConfig, prov EmbeddingProvider) []string {
+	var models []string
+	for _, ref := range refs {
+		if ref.Provider == acc.Provider && prov.SupportsEmbeddingModel(ref.Model) {
+			models = append(models, ref.Model)
 		}
-		return models
 	}
-
-	// Direct model name (no alias).
-	model := requestModel
-	if model == "" {
-		model = cfg.DefaultModel
-	}
-	if model != "" && prov.SupportsEmbeddingModel(model) {
-		return []string{model}
-	}
-	return nil
+	return models
 }
 
 // filterEmbedCandidates removes unhealthy candidates and enforces paid/spend

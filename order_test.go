@@ -271,3 +271,25 @@ func TestRouter_MultimodalNoCapableStep(t *testing.T) {
 	assert.True(t, errors.Is(err, ir.ErrMultimodalUnavailable), "got %v", err)
 	assert.Empty(t, log.snapshot(), "no step may be attempted")
 }
+
+// declareLadder gives a pre-strict-resolution test config the alias its
+// DefaultModel now needs: one step per distinct provider, in account order.
+// Resolution is strict (R2), so every request must name a declared ladder;
+// these tests predate that, and their intent — "route this model across these
+// accounts" — is exactly a ladder listing each account's provider.
+func declareLadder(cfg ir.Config) ir.Config {
+	if len(cfg.Models) > 0 || cfg.DefaultModel == "" {
+		return cfg
+	}
+	seen := map[string]bool{}
+	var refs []ir.ModelRef
+	for _, acc := range cfg.Accounts {
+		if seen[acc.Provider] {
+			continue
+		}
+		seen[acc.Provider] = true
+		refs = append(refs, ir.ModelRef{Provider: acc.Provider, Model: cfg.DefaultModel})
+	}
+	cfg.Models = []ir.ModelMapping{{Alias: cfg.DefaultModel, Models: refs}}
+	return cfg
+}

@@ -206,7 +206,7 @@ func TestEmbedBatch_NoEmbeddingProviders(t *testing.T) {
 			{Provider: "mock", ID: "acc-1", DailyFree: 1000, QuotaUnit: ir.QuotaTokens},
 		},
 	}
-	r, err := ir.NewRouter(cfg, []ir.Provider{chatOnly})
+	r, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{chatOnly})
 	require.NoError(t, err)
 
 	_, err = r.EmbedBatch(context.Background(), ir.EmbedRequest{

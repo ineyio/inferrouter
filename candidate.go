@@ -1,24 +1,32 @@
 package inferrouter
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
-// resolveModel resolves a model name through aliases and defaults.
-// Returns a list of (provider, model) pairs to try.
-func resolveModel(cfg Config, requestModel string) []ModelRef {
+// resolveModel resolves a model name to the ordered steps of its ladder.
+//
+// Resolution is strict: the name must be a declared alias. A name that is not
+// declared is a configuration error (ErrUnknownAlias), not a request to try
+// that name against every provider — the old fallback let a typo in a ladder
+// name widen the candidate set to every account (RFC inferrouter-purpose §3.4).
+func resolveModel(cfg Config, requestModel string) ([]ModelRef, error) {
 	model := requestModel
 	if model == "" {
 		model = cfg.DefaultModel
 	}
+	if model == "" {
+		return nil, fmt.Errorf("%w: request names no model and config has no default_model", ErrUnknownAlias)
+	}
 
-	// Check aliases.
 	for _, m := range cfg.Models {
 		if m.Alias == model {
-			return m.Models
+			return m.Models, nil
 		}
 	}
 
-	// Direct model name — will be tried against all providers.
-	return nil
+	return nil, fmt.Errorf("%w: %q", ErrUnknownAlias, model)
 }
 
 // buildCandidates creates the list of possible candidates for a request.
@@ -41,33 +49,22 @@ func buildCandidates(
 	inflight *InflightTracker,
 	requestModel string,
 ) ([]Candidate, error) {
-	refs := resolveModel(cfg, requestModel)
-	var candidates []Candidate
-
-	if len(refs) > 0 {
-		for _, ref := range refs {
-			for _, acc := range cfg.Accounts {
-				if acc.Provider != ref.Provider {
-					continue
-				}
-				prov, ok := providers[acc.Provider]
-				if !ok {
-					continue
-				}
-				candidates = append(candidates, newCandidate(ctx, acc, prov, ref.Model, quotaStore, health, spend, inflight))
-			}
-		}
-		return candidates, nil
+	refs, err := resolveModel(cfg, requestModel)
+	if err != nil {
+		return nil, err
 	}
 
-	// Direct model name — tried against every provider that claims support.
-	for _, acc := range cfg.Accounts {
-		prov, ok := providers[acc.Provider]
-		if !ok {
-			continue
-		}
-		for _, model := range modelsForAccount(refs, acc, prov, requestModel, cfg) {
-			candidates = append(candidates, newCandidate(ctx, acc, prov, model, quotaStore, health, spend, inflight))
+	var candidates []Candidate
+	for _, ref := range refs {
+		for _, acc := range cfg.Accounts {
+			if acc.Provider != ref.Provider {
+				continue
+			}
+			prov, ok := providers[acc.Provider]
+			if !ok {
+				continue
+			}
+			candidates = append(candidates, newCandidate(ctx, acc, prov, ref.Model, quotaStore, health, spend, inflight))
 		}
 	}
 
@@ -110,31 +107,6 @@ func newCandidate(
 		MaxDailySpend:          acc.MaxDailySpend,
 		CurrentSpend:           spend.GetSpend(acc.ID),
 	}
-}
-
-// modelsForAccount returns the models to try for a given account.
-func modelsForAccount(refs []ModelRef, acc AccountConfig, prov Provider, requestModel string, cfg Config) []string {
-	// If we have explicit refs from alias resolution, filter for this provider.
-	if len(refs) > 0 {
-		var models []string
-		for _, ref := range refs {
-			if ref.Provider == acc.Provider {
-				models = append(models, ref.Model)
-			}
-		}
-		return models
-	}
-
-	// Direct model name — check if provider supports it.
-	model := requestModel
-	if model == "" {
-		model = cfg.DefaultModel
-	}
-	if model != "" && prov.SupportsModel(model) {
-		return []string{model}
-	}
-
-	return nil
 }
 
 // filterCandidates removes unhealthy candidates, enforces paid/spend limits,

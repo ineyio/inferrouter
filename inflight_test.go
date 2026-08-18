@@ -51,6 +51,10 @@ func inflightTestConfig(providerName string) Config {
 	return Config{
 		DefaultModel: "m",
 		AllowPaid:    true,
+		Models: []ModelMapping{{
+			Alias:  "m",
+			Models: []ModelRef{{Provider: providerName, Model: "m"}},
+		}},
 		Accounts: []AccountConfig{{
 			Provider:           providerName,
 			ID:                 "acc-1",

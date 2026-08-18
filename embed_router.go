@@ -20,21 +20,26 @@ import (
 func validateEmbeddingAliases(cfg Config, embedProviders map[string]EmbeddingProvider) error {
 	for _, alias := range cfg.Models {
 		containsEmbedding := false
+		models := make(map[string]struct{}, len(alias.Models))
 		for _, ref := range alias.Models {
+			models[ref.Model] = struct{}{}
 			prov, ok := embedProviders[ref.Provider]
 			if !ok {
 				continue
 			}
 			if prov.SupportsEmbeddingModel(ref.Model) {
 				containsEmbedding = true
-				break
 			}
 		}
-		if containsEmbedding && len(alias.Models) > 1 {
-			return fmt.Errorf("%w: embedding alias %q must contain exactly one model entry "+
-				"(got %d); cross-model fallback breaks RAG correctness — use multi-account "+
-				"fallback on the same model instead",
-				ErrInvalidConfig, alias.Alias, len(alias.Models))
+		// The guarantee is one MODEL, not one step: vector spaces are tied to
+		// the model, not to the endpoint serving it. Several steps naming the
+		// same model are the recommended multi-account fallback — and since
+		// resolution is strict, a ladder is the only way to express it.
+		if containsEmbedding && len(models) > 1 {
+			return fmt.Errorf("%w: embedding alias %q must reference exactly one model "+
+				"(got %d distinct); cross-model fallback breaks RAG correctness — use "+
+				"multi-account fallback on the same model instead",
+				ErrInvalidConfig, alias.Alias, len(models))
 		}
 	}
 	return nil
@@ -46,7 +51,11 @@ func validateEmbeddingAliases(cfg Config, embedProviders map[string]EmbeddingPro
 // have no pluggable Policy — if deliberate reordering is ever needed here,
 // parallel the chat Policy interface at that point.
 func (r *Router) prepareEmbedRoute(ctx context.Context, requestModel string) ([]EmbedCandidate, error) {
-	candidates := buildEmbedCandidates(ctx, r.cfg, r.embedProviders, r.quotaStore, r.health, r.spend, requestModel)
+	candidates, err := buildEmbedCandidates(ctx, r.cfg, r.embedProviders, r.quotaStore, r.health, r.spend, requestModel)
+	if err != nil {
+		return nil, err
+	}
+
 	candidates = filterEmbedCandidates(candidates, r.cfg.AllowPaid)
 	if len(candidates) == 0 {
 		return nil, ErrNoEmbeddingProviders

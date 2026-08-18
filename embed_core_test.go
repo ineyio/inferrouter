@@ -95,7 +95,7 @@ func TestNewRouter_RejectsCrossModelEmbeddingAlias(t *testing.T) {
 		},
 	}
 
-	_, err := ir.NewRouter(cfg, []ir.Provider{embedProviderAsProvider(embedProv)})
+	_, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{embedProviderAsProvider(embedProv)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ir.ErrInvalidConfig)
 	assert.Contains(t, err.Error(), "bad-embed")
@@ -127,7 +127,7 @@ func TestNewRouter_AcceptsSingleModelEmbeddingAlias(t *testing.T) {
 		},
 	}
 
-	_, err := ir.NewRouter(cfg, []ir.Provider{embedProviderAsProvider(embedProv)})
+	_, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{embedProviderAsProvider(embedProv)})
 	assert.NoError(t, err)
 }
 
@@ -150,7 +150,7 @@ func TestNewRouter_ChatAliasMultiModelUnaffected(t *testing.T) {
 			{Provider: "mock", ID: "acc-1", DailyFree: 100, QuotaUnit: ir.QuotaTokens},
 		},
 	}
-	_, err := ir.NewRouter(cfg, []ir.Provider{chatProv})
+	_, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{chatProv})
 	assert.NoError(t, err)
 }
 
@@ -189,7 +189,7 @@ func newEmbedRouter(t *testing.T, cfg ir.Config, embedProv *mock.EmbedProvider, 
 	t.Helper()
 	qs := quota.NewMemoryQuotaStore()
 	providers := append([]ir.Provider{embedProviderAsProvider(embedProv)}, extra...)
-	r, err := ir.NewRouter(cfg, providers,
+	r, err := ir.NewRouter(declareLadder(cfg), providers,
 		ir.WithQuotaStore(qs),
 		ir.WithMeter(&meter.NoopMeter{}),
 	)

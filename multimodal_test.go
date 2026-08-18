@@ -28,7 +28,7 @@ func newMultimodalTestRouter(t *testing.T, providers ...ir.Provider) *ir.Router 
 		DefaultModel: "mock-model",
 		Accounts:     accounts,
 	}
-	r, err := ir.NewRouter(cfg, providers, ir.WithQuotaStore(quota.NewMemoryQuotaStore()))
+	r, err := ir.NewRouter(declareLadder(cfg), providers, ir.WithQuotaStore(quota.NewMemoryQuotaStore()))
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}

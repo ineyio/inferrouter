@@ -20,8 +20,17 @@ func main() {
 	// Quota store — NewRouter auto-initializes limits from AccountConfig.DailyFree.
 	qs := quota.NewMemoryQuotaStore()
 
+	// Every request resolves through a declared alias (ladder). Even a
+	// single-step one is spelled out — an undeclared name is an error, never
+	// an attempt against every configured provider.
 	cfg := ir.Config{
-		DefaultModel: "gemini-2.0-flash",
+		DefaultModel: "fast",
+		Models: []ir.ModelMapping{
+			{
+				Alias:  "fast",
+				Models: []ir.ModelRef{{Provider: "gemini", Model: "gemini-2.0-flash"}},
+			},
+		},
 		Accounts: []ir.AccountConfig{
 			{
 				Provider:  "gemini",

@@ -35,6 +35,13 @@ var (
 	// MaxBatchSize. Callers should use EmbedBatch for automatic splitting.
 	ErrBatchTooLarge = errors.New("inferrouter: batch exceeds provider max size")
 
+	// ErrUnknownAlias is returned when the requested model does not name a
+	// declared alias (ladder). Resolution is strict: an unrecognised name is a
+	// configuration error, never an invitation to try the name against every
+	// configured provider. That fallback used to turn a typo in a ladder name
+	// into "every account is a candidate" — see RFC inferrouter-purpose §3.4.
+	ErrUnknownAlias = errors.New("inferrouter: unknown model alias")
+
 	// ErrInvalidConfig is returned by NewRouter for structural config problems
 	// that cannot be expressed via YAML schema alone (e.g. embedding alias
 	// with multiple models — see RFC §3.6 single-model invariant).
@@ -122,7 +129,9 @@ func (e *RouterError) Unwrap() error {
 
 // IsFatal returns true if the error should not be retried with another candidate.
 func IsFatal(err error) bool {
-	return errors.Is(err, ErrAuthFailed) || errors.Is(err, ErrInvalidRequest)
+	return errors.Is(err, ErrAuthFailed) ||
+		errors.Is(err, ErrInvalidRequest) ||
+		errors.Is(err, ErrUnknownAlias)
 }
 
 // IsRetryable returns true if the error can be retried with another candidate.

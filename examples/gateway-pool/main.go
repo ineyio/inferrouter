@@ -25,7 +25,16 @@ func main() {
 
 	cfg := ir.Config{
 		AllowPaid:    true,
-		DefaultModel: model,
+		DefaultModel: "pool",
+		// One step per gateway, in preference order. Without a policy the
+		// router walks them exactly as listed; LeastBusyPolicy below opts into
+		// load-spreading instead.
+		Models: []ir.ModelMapping{
+			{
+				Alias:  "pool",
+				Models: []ir.ModelRef{{Provider: "gonkagate", Model: model}},
+			},
+		},
 		Accounts: []ir.AccountConfig{
 			{
 				Provider:           "gonkagate",

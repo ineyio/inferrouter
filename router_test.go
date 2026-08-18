@@ -20,7 +20,7 @@ import (
 func newTestRouter(t *testing.T, cfg ir.Config, providers []ir.Provider) *ir.Router {
 	t.Helper()
 	qs := quota.NewMemoryQuotaStore()
-	r, err := ir.NewRouter(cfg, providers,
+	r, err := ir.NewRouter(declareLadder(cfg), providers,
 		ir.WithQuotaStore(qs),
 		ir.WithPolicy(&policy.FreeFirstPolicy{}),
 		ir.WithMeter(&meter.NoopMeter{}),
@@ -335,7 +335,7 @@ func TestQuotaAutoInit_FromConfig(t *testing.T) {
 
 	// Don't call SetQuota manually — NewRouter should do it.
 	qs := quota.NewMemoryQuotaStore()
-	r, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+	r, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{mockProv},
 		ir.WithQuotaStore(qs),
 		ir.WithPolicy(&policy.FreeFirstPolicy{}),
 	)
@@ -381,7 +381,7 @@ func TestLeastBusySpreadsConcurrentRequests(t *testing.T) {
 			{Provider: "gw2", ID: "acc-gw2", QuotaUnit: ir.QuotaTokens, DailyFree: 100000},
 		},
 	}
-	router, err := ir.NewRouter(cfg, []ir.Provider{gw1, gw2},
+	router, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{gw1, gw2},
 		ir.WithQuotaStore(quota.NewMemoryQuotaStore()),
 		ir.WithPolicy(&policy.LeastBusyPolicy{}),
 	)
@@ -635,7 +635,7 @@ func TestMaxDailySpend_Enforcement(t *testing.T) {
 	qs := quota.NewMemoryQuotaStore()
 	st := ir.NewSpendTracker()
 
-	r, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+	r, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{mockProv},
 		ir.WithQuotaStore(qs),
 		ir.WithPolicy(&policy.FreeFirstPolicy{}),
 		ir.WithSpendTracker(st),
@@ -680,7 +680,7 @@ func TestSeparateInputOutputPricing(t *testing.T) {
 	qs := quota.NewMemoryQuotaStore()
 	st := ir.NewSpendTracker()
 
-	r, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+	r, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{mockProv},
 		ir.WithQuotaStore(qs),
 		ir.WithPolicy(&policy.FreeFirstPolicy{}),
 		ir.WithSpendTracker(st),
@@ -754,7 +754,7 @@ func TestStream_QuotaCommitError_Reported(t *testing.T) {
 		},
 	}
 
-	r, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+	r, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{mockProv},
 		ir.WithQuotaStore(failQS),
 		ir.WithMeter(spy),
 	)
@@ -903,7 +903,7 @@ func TestStream_Close_ReturnsQuotaError(t *testing.T) {
 		},
 	}
 
-	r, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+	r, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{mockProv},
 		ir.WithQuotaStore(failQS),
 	)
 	require.NoError(t, err)
@@ -941,7 +941,7 @@ func TestCommitError_ReportedViaMeter(t *testing.T) {
 		},
 	}
 
-	r, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+	r, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{mockProv},
 		ir.WithQuotaStore(failQS),
 		ir.WithMeter(spy),
 	)
@@ -975,7 +975,7 @@ func TestRollbackError_ReportedViaMeter(t *testing.T) {
 		},
 	}
 
-	r, err := ir.NewRouter(cfg, []ir.Provider{failProv},
+	r, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{failProv},
 		ir.WithQuotaStore(failRollbackQS),
 		ir.WithMeter(spy),
 	)
@@ -1005,7 +1005,7 @@ func TestRemainingError_FailOpen_FreeTier(t *testing.T) {
 		},
 	}
 
-	r, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+	r, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{mockProv},
 		ir.WithQuotaStore(failRemainQS),
 	)
 	require.NoError(t, err)
@@ -1032,7 +1032,7 @@ func TestNewRouter_SetQuotaError_Propagated(t *testing.T) {
 		},
 	}
 
-	_, err := ir.NewRouter(cfg, []ir.Provider{mockProv},
+	_, err := ir.NewRouter(declareLadder(cfg), []ir.Provider{mockProv},
 		ir.WithQuotaStore(failInitQS),
 	)
 	require.Error(t, err)

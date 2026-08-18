@@ -134,6 +134,10 @@ func TestBuildCandidatesResolvesModalityCostFallback(t *testing.T) {
 	provs := map[string]Provider{"gemini": &testProvider{name: "gemini", multimodal: true}}
 	cfg := Config{
 		DefaultModel: "gemini-2.5-flash-lite",
+		Models: []ModelMapping{{
+			Alias:  "gemini-2.5-flash-lite",
+			Models: []ModelRef{{Provider: "gemini", Model: "gemini-2.5-flash-lite"}},
+		}},
 		Accounts: []AccountConfig{
 			{
 				Provider:           "gemini",
@@ -179,6 +183,10 @@ func TestBuildCandidatesExplicitModalityRatesWin(t *testing.T) {
 	provs := map[string]Provider{"gemini": &testProvider{name: "gemini", multimodal: true}}
 	cfg := Config{
 		DefaultModel: "gemini-2.5-flash-lite",
+		Models: []ModelMapping{{
+			Alias:  "gemini-2.5-flash-lite",
+			Models: []ModelRef{{Provider: "gemini", Model: "gemini-2.5-flash-lite"}},
+		}},
 		Accounts: []AccountConfig{
 			{
 				Provider:               "gemini",
