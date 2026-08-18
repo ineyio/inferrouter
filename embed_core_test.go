@@ -209,9 +209,9 @@ type embedOnlyStub struct {
 	inner *mock.EmbedProvider
 }
 
-func (s *embedOnlyStub) Name() string                { return s.inner.Name() }
-func (s *embedOnlyStub) SupportsModel(string) bool   { return false }
-func (s *embedOnlyStub) SupportsMultimodal() bool    { return false }
+func (s *embedOnlyStub) Name() string              { return s.inner.Name() }
+func (s *embedOnlyStub) SupportsModel(string) bool { return false }
+func (s *embedOnlyStub) SupportsMultimodal() bool  { return false }
 func (s *embedOnlyStub) ChatCompletion(context.Context, ir.ProviderRequest) (ir.ProviderResponse, error) {
 	return ir.ProviderResponse{}, errors.New("mock-embed does not support chat")
 }
@@ -224,5 +224,7 @@ func (s *embedOnlyStub) ChatCompletionStream(context.Context, ir.ProviderRequest
 func (s *embedOnlyStub) Embed(ctx context.Context, req ir.EmbedProviderRequest) (ir.EmbedProviderResponse, error) {
 	return s.inner.Embed(ctx, req)
 }
-func (s *embedOnlyStub) SupportsEmbeddingModel(m string) bool { return s.inner.SupportsEmbeddingModel(m) }
-func (s *embedOnlyStub) MaxBatchSize() int                    { return s.inner.MaxBatchSize() }
+func (s *embedOnlyStub) SupportsEmbeddingModel(m string) bool {
+	return s.inner.SupportsEmbeddingModel(m)
+}
+func (s *embedOnlyStub) MaxBatchSize() int { return s.inner.MaxBatchSize() }
