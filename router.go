@@ -327,6 +327,11 @@ func buildProviderRequest(c Candidate, req ChatRequest, stream, hasMedia bool) P
 		Stop:        req.Stop,
 		Stream:      stream,
 		HasMedia:    hasMedia,
+		// Offered to every candidate alike. The router does not know which
+		// gateways honour it — capability here is a property of the endpoint,
+		// not of the adapter type — so filtering candidates on it would mean
+		// guessing, and guessing wrong costs a working ladder step.
+		ResponseFormat: req.ResponseFormat,
 	}
 }
 
@@ -431,6 +436,10 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 				Model:     c.Model,
 				Attempts:  attempt + 1,
 				Free:      c.Free,
+				// From the adapter's report, never from req.ResponseFormat != nil:
+				// the request says what was asked, and only the adapter knows
+				// what was sent.
+				StructuredOutput: resp.StructuredOutputApplied,
 			},
 		}, nil
 	}

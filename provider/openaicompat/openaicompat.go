@@ -93,6 +93,11 @@ type apiRequest struct {
 	TopP        *float64     `json:"top_p,omitempty"`
 	Stream      bool         `json:"stream,omitempty"`
 	Stop        []string     `json:"stop,omitempty"`
+
+	// omitempty on a pointer, so a request without a format carries no
+	// response_format key at all. A present-but-null key is a different thing
+	// to a gateway than an absent one, and older endpoints reject it.
+	ResponseFormat *inferrouter.ResponseFormat `json:"response_format,omitempty"`
 }
 
 type apiMessage struct {
@@ -162,6 +167,11 @@ func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderR
 		Content:      resp.Choices[0].Message.Content,
 		FinishReason: resp.Choices[0].FinishReason,
 		Model:        resp.Model,
+		// Read off the body we built, not off the argument: this is the claim
+		// "the constraint went out on the wire", and the body is the wire. The
+		// endpoint accepted it — whether it then honoured it is not knowable
+		// from here, and is not what this field says.
+		StructuredOutputApplied: body.ResponseFormat != nil,
 		Usage: inferrouter.Usage{
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
@@ -202,6 +212,9 @@ func (p *Provider) buildRequest(req inferrouter.ProviderRequest, stream bool) ap
 		TopP:        req.TopP,
 		Stream:      stream,
 		Stop:        req.Stop,
+		// Passed through unchanged, schema bytes included: the caller wrote
+		// that schema and is the one who will be told whether it held.
+		ResponseFormat: req.ResponseFormat,
 	}
 }
 

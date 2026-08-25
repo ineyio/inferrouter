@@ -42,6 +42,15 @@ type ProviderRequest struct {
 	// rewalk Messages/Parts (important on the streaming path where buildUsage
 	// fires per chunk).
 	HasMedia bool
+
+	// ResponseFormat is the caller's output constraint, or nil.
+	//
+	// An adapter that cannot express it leaves it alone and reports
+	// StructuredOutputApplied false — dropping it silently is allowed, lying
+	// about it is not. Ignoring is the right default: the alternative is an
+	// error that would take a whole gateway out of a ladder over a field the
+	// caller asked for as an improvement, not as a condition.
+	ResponseFormat *ResponseFormat
 }
 
 // ProviderResponse is the response from a provider adapter.
@@ -51,6 +60,15 @@ type ProviderResponse struct {
 	FinishReason string
 	Usage        Usage
 	Model        string
+
+	// StructuredOutputApplied reports that this adapter serialised
+	// ProviderRequest.ResponseFormat into the request it sent.
+	//
+	// Only the code that writes the field may set it — an adapter that never
+	// looks at ResponseFormat leaves the zero value, which is the truth about
+	// it. The router copies this to RoutingInfo.StructuredOutput; nothing
+	// else may.
+	StructuredOutputApplied bool
 }
 
 // ProviderStream is the interface for streaming responses.

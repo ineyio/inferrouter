@@ -1,5 +1,7 @@
 package inferrouter
 
+import "encoding/json"
+
 // ChatRequest represents a chat completion request.
 type ChatRequest struct {
 	Model       string    `json:"model"`
@@ -9,6 +11,50 @@ type ChatRequest struct {
 	TopP        *float64  `json:"top_p,omitempty"`
 	Stream      bool      `json:"stream,omitempty"`
 	Stop        []string  `json:"stop,omitempty"`
+
+	// ResponseFormat asks the serving endpoint to constrain its own output —
+	// the provider-side counterpart of validating an answer after the fact.
+	//
+	// It is a request, never a guarantee. A ladder step is a gateway, and
+	// gateways differ: one honours the field, the next ignores it, a third
+	// rejects the request outright. Whether it reached the wire is reported
+	// back on RoutingInfo.StructuredOutput, so a caller can tell "asked and
+	// applied" from "asked and dropped" — a caller that needs the answer to
+	// actually satisfy a schema still has to check it.
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+}
+
+// ResponseFormat is the output constraint asked of the endpoint.
+//
+// Shaped after the OpenAI chat-completions field, because that is the wire
+// format every gateway this library speaks to derives from.
+type ResponseFormat struct {
+	// Type is the mode: "json_object" promises valid JSON, "json_schema"
+	// promises a shape. Adapters pass it through rather than validating it —
+	// the vocabulary belongs to the endpoint, and a library that policed it
+	// would go stale the first time a provider added a mode.
+	Type string `json:"type"`
+
+	// JSONSchema carries the shape for Type "json_schema".
+	JSONSchema *JSONSchemaSpec `json:"json_schema,omitempty"`
+}
+
+// JSONSchemaSpec is the schema half of a "json_schema" response format.
+type JSONSchemaSpec struct {
+	// Name labels the schema for the endpoint. Not resolvable and not an
+	// address: nothing dereferences it.
+	Name string `json:"name"`
+
+	// Strict opts into the provider's restricted schema subset (closed
+	// objects, every property required). Off by default because a schema
+	// authored against full JSON Schema is usually outside that subset, and a
+	// gateway answers that mismatch with a 400 — turning a schema our own
+	// validator accepts into a request that cannot be sent at all.
+	Strict bool `json:"strict,omitempty"`
+
+	// Schema is the schema itself, passed to the endpoint byte for byte. The
+	// caller owns its contents; this library neither compiles nor rewrites it.
+	Schema json.RawMessage `json:"schema"`
 }
 
 // Message represents a chat message.
@@ -95,6 +141,18 @@ type RoutingInfo struct {
 	Model     string
 	Attempts  int
 	Free      bool
+
+	// StructuredOutput reports whether the serving adapter actually put
+	// ChatRequest.ResponseFormat on the wire.
+	//
+	// It is set by the adapter that serialised the field, never by the router
+	// from the fact that the caller asked: an adapter that does not know the
+	// field would otherwise be credited with honouring it, and the caller
+	// would read a promise nobody made. False therefore covers both "not
+	// asked" and "asked, but this endpoint's adapter cannot send it".
+	//
+	// It says the request carried the constraint — not that the model obeyed.
+	StructuredOutput bool
 }
 
 // StreamChunk represents a single chunk in a streaming response.
