@@ -235,7 +235,10 @@ func (p *Provider) doRequest(ctx context.Context, auth inferrouter.Auth, body ap
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, inferrouter.ErrProviderUnavailable
+		// Keep the transport error in the chain: "connection refused", a DNS
+		// failure and a deadline are three different outages, and this text is
+		// the only trace of which one it was once the attempt is recorded.
+		return nil, fmt.Errorf("%w: %v", inferrouter.ErrProviderUnavailable, err)
 	}
 
 	return resp, nil

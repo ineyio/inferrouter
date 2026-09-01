@@ -198,6 +198,15 @@ func TestChatCompletionNetworkError(t *testing.T) {
 	if !errors.Is(err, ir.ErrProviderUnavailable) {
 		t.Errorf("err = %v, want ErrProviderUnavailable", err)
 	}
+	// The transport error must survive in the prose: a bare sentinel makes a
+	// DNS failure, a refused connection and a deadline indistinguishable in
+	// whatever record the caller keeps of the attempt.
+	if err.Error() == ir.ErrProviderUnavailable.Error() {
+		t.Errorf("err = %q carries no transport detail beyond the sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("err = %q, want the dial error (connection refused) preserved", err)
+	}
 }
 
 func TestChatCompletionStreamHappyPath(t *testing.T) {
