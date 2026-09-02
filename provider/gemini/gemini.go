@@ -10,12 +10,32 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ineyio/inferrouter"
 )
 
 const defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
+
+const (
+	// errorBodyLimit is how much of an error response we read. Google puts its
+	// RetryInfo in error.details, at the tail of the body, so the old 1KB was
+	// enough for a diagnostic string but not enough to see the one number in
+	// the response that is actionable.
+	errorBodyLimit = 8192
+
+	// errorDetailLimit is how much of that body reaches the error message —
+	// unchanged, so error text stays the size callers already log.
+	errorDetailLimit = 1024
+
+	// maxRetryAfter caps a provider-supplied delay. A provider is free to name
+	// an absurd number, and a caller parked on it is indistinguishable from a
+	// hang. Observed Gemini values sit around 30s, so the cap is set above
+	// them rather than through them.
+	maxRetryAfter = 60 * time.Second
+)
 
 // Provider is the Gemini API adapter.
 type Provider struct {
@@ -328,19 +348,25 @@ func mapHTTPError(resp *http.Response) error {
 	}
 
 	// Best-effort body read for diagnostics.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, errorBodyLimit))
 	resp.Body.Close()
 
 	detail := ""
 	if err == nil && len(body) > 0 {
 		detail = string(body)
+		if len(detail) > errorDetailLimit {
+			detail = detail[:errorDetailLimit]
+		}
 	} else {
 		detail = http.StatusText(resp.StatusCode)
 	}
 
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("%w: %s", inferrouter.ErrRateLimited, detail)
+		return &inferrouter.RateLimitedError{
+			RetryAfter: parseRetryAfter(resp.Header, body, time.Now()),
+			Detail:     detail,
+		}
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return fmt.Errorf("%w: %s", inferrouter.ErrAuthFailed, detail)
 	case http.StatusBadRequest:
@@ -348,6 +374,81 @@ func mapHTTPError(resp *http.Response) error {
 	default:
 		return fmt.Errorf("%w: HTTP %d: %s", inferrouter.ErrProviderUnavailable, resp.StatusCode, detail)
 	}
+}
+
+// parseRetryAfter extracts how long the provider wants us to wait from the two
+// places Google puts it: the standard Retry-After header and a google.rpc
+// RetryInfo detail in the JSON body. They can disagree, so the longer one
+// wins — under-waiting just earns another 429.
+//
+// Zero means the provider said nothing, which is not the same as "retry now":
+// the consumer falls back to its own backoff.
+func parseRetryAfter(h http.Header, body []byte, now time.Time) time.Duration {
+	delay := headerRetryAfter(h.Get("Retry-After"), now)
+	if fromBody := bodyRetryDelay(body); fromBody > delay {
+		delay = fromBody
+	}
+
+	if delay < 0 {
+		return 0
+	}
+	if delay > maxRetryAfter {
+		return maxRetryAfter
+	}
+	return delay
+}
+
+// headerRetryAfter reads a Retry-After header, which RFC 9110 allows to be
+// either a count of seconds or an HTTP-date.
+func headerRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+
+	if when, err := http.ParseTime(value); err == nil {
+		if d := when.Sub(now); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// bodyRetryDelay reads google.rpc.RetryInfo out of an error body. The detail
+// is matched by @type suffix rather than by position, because Google orders
+// details freely and adds new kinds without notice.
+//
+// A truncated or unparseable body yields zero, never an error: this is a hint,
+// and losing it costs a default backoff, not a request.
+func bodyRetryDelay(body []byte) time.Duration {
+	var payload struct {
+		Error struct {
+			Details []struct {
+				Type       string `json:"@type"`
+				RetryDelay string `json:"retryDelay"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return 0
+	}
+
+	for _, detail := range payload.Error.Details {
+		if !strings.Contains(detail.Type, "RetryInfo") {
+			continue
+		}
+		if d, err := time.ParseDuration(detail.RetryDelay); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 type geminiStream struct {

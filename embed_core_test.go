@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	ir "github.com/ineyio/inferrouter"
 	"github.com/ineyio/inferrouter/meter"
@@ -192,6 +193,9 @@ func newEmbedRouter(t *testing.T, cfg ir.Config, embedProv *mock.EmbedProvider, 
 	r, err := ir.NewRouter(declareLadder(cfg), providers,
 		ir.WithQuotaStore(qs),
 		ir.WithMeter(&meter.NoopMeter{}),
+		// Retry backoff is real time; no test wants to spend it. Tests that
+		// assert ON the pausing install their own recording sleeper.
+		ir.WithSleeper(func(context.Context, time.Duration) error { return nil }),
 	)
 	require.NoError(t, err)
 	return r

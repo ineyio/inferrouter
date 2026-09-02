@@ -1,6 +1,7 @@
 package inferrouter
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -195,4 +196,99 @@ func TestRateLimiter_CerebrasScenario(t *testing.T) {
 
 	// qwen-3-235b still has budget.
 	assert.True(t, rl.Allow("cerebras-free", "qwen-3-235b"), "qwen should be independent")
+}
+
+// --- Pacing (Wait) ---
+//
+// Wait is the embedding path's answer to a burst: an embedding caller can
+// absorb a pause, but cannot absorb a missing vector. These tests drive it
+// with a fake clock and a fake sleeper, so the overlap they describe is
+// forced rather than hoped for.
+
+// Wait must block until the minute window frees a slot — and then let the
+// request through. Both halves matter: a Wait that always blocked would pass
+// the first assertion alone.
+func TestRateLimiter_Wait_BlocksUntilMinuteWindowFrees(t *testing.T) {
+	base := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	now := base
+
+	rl := NewRateLimiter()
+	rl.now = func() time.Time { return now }
+
+	var slept []time.Duration
+	rl.sleep = func(_ context.Context, d time.Duration) error {
+		slept = append(slept, d)
+		now = now.Add(d) // waking up means the clock really moved
+		return nil
+	}
+	rl.SetAccountDefault("acc", Limits{RPM: 2})
+
+	require.NoError(t, rl.Wait(context.Background(), "acc", "model"))
+	now = now.Add(10 * time.Second)
+	require.NoError(t, rl.Wait(context.Background(), "acc", "model"))
+
+	// Third request is early, not over budget.
+	require.NoError(t, rl.Wait(context.Background(), "acc", "model"))
+
+	require.Len(t, slept, 1, "third request must pause exactly once")
+	// The oldest slot was taken at base, so the window frees at base+1m —
+	// 50s after the clock reached base+10s.
+	assert.Equal(t, 50*time.Second, slept[0])
+}
+
+// A day window that is spent cannot be waited out inside any request's
+// lifetime, so Wait must refuse immediately and say which window refused it.
+func TestRateLimiter_Wait_DoesNotSleepOnDailyWindow(t *testing.T) {
+	rl := NewRateLimiter()
+	rl.now = func() time.Time { return time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC) }
+
+	sleeps := 0
+	rl.sleep = func(context.Context, time.Duration) error {
+		sleeps++
+		return nil
+	}
+	rl.SetAccountDefault("acc", Limits{RPM: 10, RPD: 1})
+
+	require.NoError(t, rl.Wait(context.Background(), "acc", "model"))
+
+	err := rl.Wait(context.Background(), "acc", "model")
+	require.ErrorIs(t, err, ErrRateWindowExhausted)
+	assert.NotErrorIs(t, err, ErrRPMExceeded, "a day refusal must not claim to be a minute refusal")
+	assert.Contains(t, err.Error(), "day window")
+	assert.Zero(t, sleeps, "an exhausted day allowance must not park the caller")
+}
+
+// A cancelled context ends the wait, rather than the wait outliving the
+// request that asked for it.
+func TestRateLimiter_Wait_HonoursContextCancellation(t *testing.T) {
+	rl := NewRateLimiter()
+	rl.now = func() time.Time { return time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC) }
+	rl.sleep = realSleep
+	rl.SetAccountDefault("acc", Limits{RPM: 1})
+
+	require.NoError(t, rl.Wait(context.Background(), "acc", "model"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.ErrorIs(t, rl.Wait(ctx, "acc", "model"), context.Canceled)
+}
+
+// A background worker's context has no deadline of its own, so Wait carries
+// its own ceiling: under sustained contention it gives up rather than parking
+// the worker forever.
+func TestRateLimiter_Wait_GivesUpAfterMaxRounds(t *testing.T) {
+	rl := NewRateLimiter()
+	// Clock never advances, so the window never frees.
+	rl.now = func() time.Time { return time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC) }
+
+	sleeps := 0
+	rl.sleep = func(context.Context, time.Duration) error {
+		sleeps++
+		return nil
+	}
+	rl.SetAccountDefault("acc", Limits{RPM: 1})
+
+	require.NoError(t, rl.Wait(context.Background(), "acc", "model"))
+	assert.ErrorIs(t, rl.Wait(context.Background(), "acc", "model"), ErrRPMExceeded)
+	assert.Equal(t, maxWaitRounds, sleeps)
 }

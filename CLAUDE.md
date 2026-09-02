@@ -51,13 +51,32 @@ EmbedBatch(req)
       → filterEmbedCandidates(allowPaid) (unhealthy, spend-cap)
       → len==0 → ErrNoEmbeddingProviders
       → no reordering: declared order stands (no Policy on this path)
-      → Loop candidates: Reserve → Embed → Commit/Rollback
+      → Loop candidates: Wait (pace) → Reserve → Embed (retry on 429) → Commit/Rollback
   → Consolidate: concat Embeddings (order preserved), sum Usage
   → Partial failure: first failed sub-batch stops loop,
     return EmbedResponse{prefix} + *ErrPartialBatch{ProcessedInputs}
 ```
 
 **Single-model alias invariant for embeddings** (RFC §3.6): any alias that references an embedding model must name exactly one distinct **model** — several steps pointing at the same model are the recommended multi-account fallback and are allowed. Cross-model fallback is rejected at `NewRouter` with `ErrInvalidConfig` because embedding vector spaces are not compatible between different models — routing index and query to different models silently corrupts RAG retrieval. Multi-account fallback on the same model is the reliability pattern.
+
+**Pacing and 429 on the embed path.** Where chat *skips* a rate-limited candidate, embeddings
+*wait* for one: a caller can absorb a few hundred milliseconds but not a missing vector, and an
+embedding alias names one model, so the ladder below is usually empty. `RateLimiter.Wait` sleeps
+until the minute window frees a slot (at most `maxWaitRounds` times, because a worker's context
+has no deadline of its own); an exhausted hour or day window returns `ErrRateWindowExhausted`
+immediately, since no reachable amount of waiting brings a spent allowance back.
+
+A provider 429 is retried against the *same* candidate, up to `embedRateLimitRetries` times,
+inside the same reservation — one logical request stays one reservation and one rate-limiter slot.
+The pause is the provider's own: `gemini` parses `Retry-After` and the `google.rpc` RetryInfo
+detail into `*RateLimitedError`, and the longer of the two wins, capped at `maxRetryAfter`.
+A pause that would outlive the caller's deadline is not taken at all.
+
+A 429 also does **not** feed the circuit breaker on this path. It is backpressure from a healthy
+account, and with a single embedding account, counting it as ill health converts a seconds-long
+provider window into a 30-second outage for everyone — the amplifier behind the 2026-09-01
+incident. Chat keeps the old behaviour: `settleFailure` is untouched, and `order_test.go` still
+pins the ladder's skip semantics.
 
 Fatal errors (`ErrAuthFailed`, `ErrInvalidRequest`) stop the loop immediately. Retryable errors (`ErrRateLimited`, `ErrProviderUnavailable`, `ErrQuotaExceeded`) try the next candidate. `ErrMultimodalUnavailable` is neither — callers are expected to catch it explicitly and degrade (e.g. strip media, retry via text alias).
 
@@ -83,7 +102,7 @@ Fatal errors (`ErrAuthFailed`, `ErrInvalidRequest`) stop the loop immediately. R
 
 - **Cost is metadata**: an account may bill without publishing a price. Validation accepts it; only accounts with `daily_free > 0` get a local quota (no allowance means the provider enforces its own limits, not that the budget is zero). What such an account loses is spend tracking — `Router.ConfigWarnings()` returns that as data, since the library has no logger. A `max_daily_spend` with no rate can never trigger and says so there.
 - **Reservation workflow**: Reserve (with idempotency key) → Execute → Commit (actual usage) or Rollback. Prevents double-charging on retries.
-- **Circuit breaker** (`health.go`): Per-account. 3 failures in 5min → Unhealthy. After 30s → HalfOpen. Success → Healthy.
+- **Circuit breaker** (`health.go`): Per-account. 3 failures in 5min → Unhealthy. After 30s → HalfOpen. Success → Healthy. On the embed path a 429 is not a failure (see above).
 - **Streaming** (`stream.go`): `RouterStream` wraps provider stream; commits quota on `Close()`. Uses `context.Background()` for cleanup to avoid cancelled context issues.
 - **QuotaInitializer**: If QuotaStore implements this optional interface, `NewRouter()` auto-initializes quotas from config.
 - **NoopQuotaStore/NoopMeter**: Default no-ops when not configured — allows running without quota tracking.

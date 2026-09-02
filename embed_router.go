@@ -2,11 +2,28 @@ package inferrouter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// embedRateLimitRetries is how many extra attempts a single candidate gets
+// after the provider answers 429.
+//
+// With one embedding account configured — the normal case, since vector
+// spaces forbid cross-model fallback — "try the next candidate" is not a
+// recovery. A 429 window at the provider is measured in seconds, so pausing
+// and asking the same account again is the only move that can still succeed.
+const embedRateLimitRetries = 2
+
+// embedRetryBackoff is the pause used when the provider does not say how long
+// to wait. A provider-supplied RetryAfter always wins over these.
+var embedRetryBackoff = [embedRateLimitRetries]time.Duration{
+	200 * time.Millisecond,
+	time.Second,
+}
 
 // validateEmbeddingAliases enforces the single-model invariant for embedding
 // aliases (RFC §3.6). An alias whose entries reference any embedding model
@@ -64,12 +81,18 @@ func (r *Router) prepareEmbedRoute(ctx context.Context, requestModel string) ([]
 	return candidates, nil
 }
 
-// acquireEmbed attempts RPM check and quota reservation for an embed candidate.
+// acquireEmbed paces the request against the account's rate limits and
+// reserves quota for an embed candidate.
+//
+// Unlike the chat path, which skips a rate-limited candidate and moves down
+// the ladder, this waits: an embedding caller can absorb a few hundred
+// milliseconds, but cannot absorb an empty block of memory, and the ladder
+// below is usually empty anyway.
 func (r *Router) acquireEmbed(ctx context.Context, c EmbedCandidate, estimatedTokens int64) (Reservation, *CandidateError) {
-	if !r.rateLimiter.Allow(c.AccountID, c.Model) {
+	if err := r.rateLimiter.Wait(ctx, c.AccountID, c.Model); err != nil {
 		return Reservation{}, &CandidateError{
 			Provider: c.Provider.Name(), AccountID: c.AccountID, Model: c.Model,
-			Err: ErrRPMExceeded,
+			Err: err,
 		}
 	}
 
@@ -92,7 +115,15 @@ func (r *Router) acquireEmbed(ctx context.Context, c EmbedCandidate, estimatedTo
 // an embedding provider error. Symmetric to settleFailure for chat.
 func (r *Router) settleEmbedFailure(ctx context.Context, c EmbedCandidate, reservation Reservation, providerErr error, duration time.Duration, attempt int) (*RouterError, CandidateError) {
 	rollbackErr := r.quotaStore.Rollback(ctx, reservation)
-	r.health.RecordFailure(c.AccountID)
+
+	// A 429 is backpressure, not ill health: the account is answering, and
+	// answering correctly. Counting it as a failure trips the breaker after
+	// three of them, and with a single embedding account that turns a
+	// seconds-long provider window into a 30-second outage for every caller —
+	// the same amplifier that killed 187 requests in the gonka incident.
+	if !errors.Is(providerErr, ErrRateLimited) {
+		r.health.RecordFailure(c.AccountID)
+	}
 
 	resultErr := providerErr
 	if rollbackErr != nil {
@@ -314,7 +345,7 @@ func (r *Router) embedOnce(ctx context.Context, ordered []EmbedCandidate, req Em
 		})
 
 		start := time.Now()
-		provResp, err := c.Provider.Embed(ctx, buildEmbedProviderRequest(c, req, inputs))
+		provResp, err := r.embedWithRetry(ctx, c, buildEmbedProviderRequest(c, req, inputs))
 		duration := time.Since(start)
 
 		if err != nil {
@@ -344,6 +375,48 @@ func (r *Router) embedOnce(ctx context.Context, ordered []EmbedCandidate, req Em
 	}
 
 	return EmbedResponse{}, RoutingInfo{}, allFailedError(tried, len(ordered))
+}
+
+// embedWithRetry calls one candidate, retrying that same candidate on a
+// provider 429 after the delay the provider asked for (or a short backoff if
+// it asked for nothing).
+//
+// The retry happens inside the caller's reservation: one logical request stays
+// one reservation and one rate-limiter slot, so a retry cannot double-charge
+// quota or double-count against our own pacing.
+func (r *Router) embedWithRetry(ctx context.Context, c EmbedCandidate, preq EmbedProviderRequest) (EmbedProviderResponse, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := c.Provider.Embed(ctx, preq)
+		if err == nil || attempt >= embedRateLimitRetries || !errors.Is(err, ErrRateLimited) {
+			return resp, err
+		}
+
+		delay := embedRetryBackoff[attempt]
+		var rateLimited *RateLimitedError
+		if errors.As(err, &rateLimited) && rateLimited.RetryAfter > 0 {
+			delay = rateLimited.RetryAfter
+		}
+
+		// Sleeping past the caller's deadline buys nothing: the context would
+		// cancel mid-pause and the caller would get the cancellation instead
+		// of the rate-limit error that explains it.
+		if !fitsDeadline(ctx, delay) {
+			return resp, err
+		}
+		if sleepErr := r.sleep(ctx, delay); sleepErr != nil {
+			return resp, err
+		}
+	}
+}
+
+// fitsDeadline reports whether a pause of d still leaves the context alive.
+// A context without a deadline fits anything.
+func fitsDeadline(ctx context.Context, d time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return true
+	}
+	return time.Now().Add(d).Before(deadline)
 }
 
 // splitIntoBatches splits inputs into sub-slices of at most maxBatch length.

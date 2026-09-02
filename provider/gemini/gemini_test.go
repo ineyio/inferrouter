@@ -9,8 +9,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	ir "github.com/ineyio/inferrouter"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestName(t *testing.T) {
@@ -315,4 +318,108 @@ func TestChatCompletionStreamErrorStatus(t *testing.T) {
 	if !errors.Is(err, ir.ErrAuthFailed) {
 		t.Errorf("err = %v, want ErrAuthFailed", err)
 	}
+}
+
+// --- 429 handling (embed pacing, C.21) ---
+
+// The typed rate-limit error replaced a fmt.Errorf wrapper. Its message must
+// stay byte-for-byte what callers already log and match on, and it must still
+// answer to the sentinel.
+func TestRateLimitedError_PreservesLegacyText(t *testing.T) {
+	body := `{"error":{"code":429,"message":"Quota exceeded"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	require.NoError(t, err)
+
+	mapped := mapHTTPError(resp)
+	require.Error(t, mapped)
+	assert.ErrorIs(t, mapped, ir.ErrRateLimited)
+
+	// The exact string the previous fmt.Errorf("%w: %s", …) produced.
+	assert.Equal(t, "inferrouter: rate limited by provider: "+body, mapped.Error())
+}
+
+// Google states the delay in a header, in a google.rpc RetryInfo detail, or
+// both — and the two can disagree. Under-waiting only earns another 429, so
+// the longer one wins.
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	retryInfo := func(delay string) []byte {
+		return []byte(`{"error":{"code":429,"details":[` +
+			`{"@type":"type.googleapis.com/google.rpc.QuotaFailure"},` +
+			`{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"` + delay + `"}]}}`)
+	}
+
+	tests := []struct {
+		name   string
+		header string
+		body   []byte
+		want   time.Duration
+	}{
+		{"nothing said", "", nil, 0},
+		{"header in seconds", "12", nil, 12 * time.Second},
+		{"header as http-date", now.Add(20 * time.Second).UTC().Format(http.TimeFormat), nil, 20 * time.Second},
+		{"header in the past", now.Add(-time.Hour).UTC().Format(http.TimeFormat), nil, 0},
+		{"body retry info", "", retryInfo("32s"), 32 * time.Second},
+		{"both, body longer", "5", retryInfo("18s"), 18 * time.Second},
+		{"both, header longer", "25", retryInfo("7s"), 25 * time.Second},
+		{"over the cap", "600", nil, maxRetryAfter},
+		{"unparseable header", "soon", nil, 0},
+		{"truncated body", "", []byte(`{"error":{"details":[{"@type":"…RetryInfo","retry`), 0},
+		{"no retry-info detail", "", []byte(`{"error":{"details":[{"@type":"…QuotaFailure"}]}}`), 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			if tc.header != "" {
+				h.Set("Retry-After", tc.header)
+			}
+			assert.Equal(t, tc.want, parseRetryAfter(h, tc.body, now))
+		})
+	}
+}
+
+// The delay has to survive the trip through mapHTTPError, not just the parser.
+func TestMapHTTPError_CarriesRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "9")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":429}}`))
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	require.NoError(t, err)
+
+	var rateLimited *ir.RateLimitedError
+	require.ErrorAs(t, mapHTTPError(resp), &rateLimited)
+	assert.Equal(t, 9*time.Second, rateLimited.RetryAfter)
+}
+
+// RetryInfo sits at the tail of the body, past the old 1KB read limit. The
+// message stays capped at the old size; only the parser sees the rest.
+func TestMapHTTPError_FindsRetryInfoPastOneKilobyte(t *testing.T) {
+	padding := strings.Repeat("x", 1500)
+	body := `{"error":{"code":429,"message":"` + padding + `","details":[` +
+		`{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"41s"}]}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	require.NoError(t, err)
+
+	var rateLimited *ir.RateLimitedError
+	require.ErrorAs(t, mapHTTPError(resp), &rateLimited)
+	assert.Equal(t, 41*time.Second, rateLimited.RetryAfter)
+	assert.Len(t, rateLimited.Detail, errorDetailLimit)
 }

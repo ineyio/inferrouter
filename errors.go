@@ -3,6 +3,7 @@ package inferrouter
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Sentinel errors.
@@ -17,6 +18,12 @@ var (
 	ErrModelNotFound       = errors.New("inferrouter: model not found")
 	ErrAllFailed           = errors.New("inferrouter: all candidates failed")
 	ErrRPMExceeded         = errors.New("inferrouter: requests per minute limit exceeded")
+
+	// ErrRateWindowExhausted is returned by RateLimiter.Wait when the refusal
+	// came from the hour or day window rather than the minute one. Waiting is
+	// the wrong answer there — the allowance is spent, not merely early — and
+	// ErrRPMExceeded would have named the wrong window out loud.
+	ErrRateWindowExhausted = errors.New("inferrouter: rate limit window exhausted")
 
 	// ErrMultimodalUnavailable is returned when a request contains media parts
 	// but no multimodal-capable candidate is available (all filtered out or
@@ -84,6 +91,30 @@ func (e *ErrPartialBatch) Error() string {
 
 func (e *ErrPartialBatch) Unwrap() error { return e.Cause }
 
+// RateLimitedError carries the provider's own backpressure hint alongside the
+// ErrRateLimited sentinel. Providers answering 429 usually say how long to
+// wait — in a Retry-After header, in a google.rpc RetryInfo detail, or both —
+// and that number is better than any backoff we could invent.
+//
+// It satisfies errors.Is(err, ErrRateLimited) through Unwrap, and its message
+// is byte-for-byte the one callers already read, so existing classification
+// and existing log lines are unaffected.
+type RateLimitedError struct {
+	// RetryAfter is the provider's requested delay. Zero means the provider
+	// did not say, not "retry immediately" — consumers fall back to their own
+	// backoff.
+	RetryAfter time.Duration
+
+	// Detail is the provider's response body, as before.
+	Detail string
+}
+
+func (e *RateLimitedError) Error() string {
+	return ErrRateLimited.Error() + ": " + e.Detail
+}
+
+func (e *RateLimitedError) Unwrap() error { return ErrRateLimited }
+
 // CandidateError records the error from a single candidate attempt.
 type CandidateError struct {
 	Provider  string
@@ -139,5 +170,6 @@ func IsRetryable(err error) bool {
 	return errors.Is(err, ErrRateLimited) ||
 		errors.Is(err, ErrProviderUnavailable) ||
 		errors.Is(err, ErrQuotaExceeded) ||
-		errors.Is(err, ErrRPMExceeded)
+		errors.Is(err, ErrRPMExceeded) ||
+		errors.Is(err, ErrRateWindowExhausted)
 }

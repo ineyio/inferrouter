@@ -19,6 +19,7 @@ type Router struct {
 	spend       *SpendTracker
 	rateLimiter *RateLimiter
 	inflight    *InflightTracker
+	sleep       Sleeper
 
 	// embedProviders is discovered at NewRouter via type-assertion: any
 	// Provider that also implements EmbeddingProvider is registered here.
@@ -73,6 +74,13 @@ func WithHealthConfig(cfg HealthConfig) Option {
 // WithSpendTracker sets the spend tracker.
 func WithSpendTracker(s *SpendTracker) Option {
 	return func(r *Router) { r.spend = s }
+}
+
+// WithSleeper overrides how the router pauses between retries. Production
+// code never sets it; tests use it to make backoff deterministic instead of
+// slow.
+func WithSleeper(s Sleeper) Option {
+	return func(r *Router) { r.sleep = s }
 }
 
 // WithRateLimiter sets a custom rate limiter.
@@ -134,6 +142,9 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 	}
 	if r.rateLimiter == nil {
 		r.rateLimiter = NewRateLimiter()
+	}
+	if r.sleep == nil {
+		r.sleep = realSleep
 	}
 
 	// Initialize rate limits from config.
