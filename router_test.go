@@ -476,7 +476,7 @@ func TestHealthState_String(t *testing.T) {
 // Test: Error helpers
 func TestErrorHelpers(t *testing.T) {
 	assert.True(t, ir.IsFatal(ir.ErrAuthFailed))
-	assert.True(t, ir.IsFatal(ir.ErrInvalidRequest))
+	assert.False(t, ir.IsFatal(ir.ErrInvalidRequest))
 	assert.False(t, ir.IsFatal(ir.ErrRateLimited))
 
 	assert.True(t, ir.IsRetryable(ir.ErrRateLimited))

@@ -230,7 +230,7 @@ func TestErrorTaxonomyContract(t *testing.T) {
 
 	t.Run("classification helpers", func(t *testing.T) {
 		assert.True(t, ir.IsFatal(ir.ErrAuthFailed))
-		assert.True(t, ir.IsFatal(ir.ErrInvalidRequest))
+		assert.False(t, ir.IsFatal(ir.ErrInvalidRequest), "a 400 is the gateway's verdict on this pair, the next step gets its own")
 		assert.True(t, ir.IsRetryable(ir.ErrRateLimited))
 		assert.True(t, ir.IsRetryable(ir.ErrProviderUnavailable))
 		assert.True(t, ir.IsRetryable(ir.ErrQuotaExceeded))

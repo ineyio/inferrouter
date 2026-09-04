@@ -290,3 +290,70 @@ func declareLadder(cfg ir.Config) ir.Config {
 	cfg.Models = []ir.ModelMapping{{Alias: cfg.DefaultModel, Models: refs}}
 	return cfg
 }
+
+// rejectingStep is a provider that records the attempt and refuses the request
+// outright (HTTP 400 at the wire), the way a reseller does when the model the
+// step is configured with has left its line-up.
+func rejectingStep(log *attemptLog, name string) *mock.Provider {
+	return mock.New(
+		mock.WithName(name),
+		mock.WithModels("ladder-model"),
+		mock.WithResponseFunc(func(ir.ProviderRequest) (ir.ProviderResponse, error) {
+			log.record(name)
+			return ir.ProviderResponse{}, ir.ErrInvalidRequest
+		}),
+	)
+}
+
+// A step that rejects the request does not end the walk: the refusal belongs to
+// that gateway, and the next step is asked the same question.
+//
+// Live case: proxy.gonka.gg answered "unsupported model" for the model its step
+// names while four steps behind it were healthy; every chunk that hit it died
+// with attempts=1 (qarap's rerun, pjob_16347b80c56441d6, 2026-09-04).
+//
+// Mutation: put ErrInvalidRequest back into IsFatal. The walk then stops at
+// step-one and this goes red.
+func TestRouter_InvalidRequestOnOneStepDoesNotEndTheWalk(t *testing.T) {
+	log := &attemptLog{}
+	cfg := ladderConfig("step-one", "step-two")
+	r, err := ir.NewRouter(cfg,
+		[]ir.Provider{rejectingStep(log, "step-one"), servingStep(log, "step-two")},
+		ir.WithQuotaStore(quota.NewMemoryQuotaStore()))
+	require.NoError(t, err)
+
+	resp, err := r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Model:    "ladder",
+		Messages: []ir.Message{{Role: "user", Content: "hi"}},
+	})
+	require.NoError(t, err, "the second step served, so the caller gets an answer")
+	assert.Equal(t, "step-two", resp.Routing.Provider)
+	assert.Equal(t, 2, resp.Routing.Attempts, "the refusal is counted as an attempt, not hidden")
+	assert.Equal(t, []string{"step-one", "step-two"}, log.snapshot())
+}
+
+// The other half: when every step rejects, the caller still learns that every
+// step was asked — ErrAllFailed with each refusal listed, not the first 400
+// dressed up as the ladder's verdict.
+func TestRouter_InvalidRequestOnEveryStepReportsAllTried(t *testing.T) {
+	log := &attemptLog{}
+	cfg := ladderConfig("step-one", "step-two")
+	r, err := ir.NewRouter(cfg,
+		[]ir.Provider{rejectingStep(log, "step-one"), rejectingStep(log, "step-two")},
+		ir.WithQuotaStore(quota.NewMemoryQuotaStore()))
+	require.NoError(t, err)
+
+	_, err = r.ChatCompletion(context.Background(), ir.ChatRequest{
+		Model:    "ladder",
+		Messages: []ir.Message{{Role: "user", Content: "hi"}},
+	})
+	require.Error(t, err)
+	var routerErr *ir.RouterError
+	require.True(t, errors.As(err, &routerErr), "err must carry RouterError: %v", err)
+	assert.True(t, errors.Is(routerErr.Unwrap(), ir.ErrAllFailed))
+	assert.Len(t, routerErr.Tried, 2)
+	for _, ce := range routerErr.Tried {
+		assert.True(t, errors.Is(ce.Err, ir.ErrInvalidRequest), "each refusal keeps its own cause: %v", ce.Err)
+	}
+	assert.Equal(t, []string{"step-one", "step-two"}, log.snapshot())
+}

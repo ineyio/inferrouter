@@ -159,9 +159,16 @@ func (e *RouterError) Unwrap() error {
 }
 
 // IsFatal returns true if the error should not be retried with another candidate.
+//
+// ErrInvalidRequest is deliberately NOT here. A 400 names the pair (gateway,
+// request), not the request alone: a reseller that drops a model from its
+// line-up answers "unsupported model" for a body every other step would serve.
+// Treating that as fatal aborted the whole walk on the first such answer and
+// killed chunks with four healthy steps behind them (qarap, 2026-09-04). A
+// body that really is malformed now costs one refused call per step instead —
+// bounded by the ladder, and the cheaper of the two mistakes.
 func IsFatal(err error) bool {
 	return errors.Is(err, ErrAuthFailed) ||
-		errors.Is(err, ErrInvalidRequest) ||
 		errors.Is(err, ErrUnknownAlias)
 }
 
