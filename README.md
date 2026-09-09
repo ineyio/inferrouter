@@ -194,6 +194,43 @@ accounts:
 
 On the streaming path the budget covers opening the stream. Once the first chunk is on its way the generation runs on the caller's deadline alone — a slow answer from a healthy step is not a reason to move on.
 
+## Thinking (reasoning effort)
+
+Models that think do it by default — Gemini 3.x sits at `medium` unless asked
+otherwise — and the thinking is billed at the OUTPUT rate, produced before the
+first byte of the answer, inside the same per-attempt budget as everything else.
+Ask for a level explicitly:
+
+```go
+resp, err := router.ChatCompletion(ctx, inferrouter.ChatRequest{
+    Model:    "fast",
+    Messages: msgs,
+    Reasoning: &inferrouter.ReasoningConfig{
+        Effort:         "low", // minimal | low | medium | high — the endpoint's own vocabulary
+        IncludeSummary: true,  // hand back the model's account of its thinking
+    },
+})
+
+resp.Routing.Reasoning              // did the ask reach the wire?
+resp.Choices[0].ReasoningSummary    // the thinking, never mixed into the answer
+resp.Usage.ReasoningTokens          // what it cost — NOT part of CompletionTokens
+```
+
+Adapters map it to whatever their endpoint speaks: `thinkingConfig.thinkingLevel`
+on Gemini, `reasoning_effort` on OpenAI-compatible gateways. An adapter that
+cannot express the field drops it and says so by leaving `Routing.Reasoning`
+false — the same contract as `ResponseFormat`/`Routing.StructuredOutput`, and it
+matters more here, because a dropped ask leaves the model thinking at its own
+default, which is the expensive end.
+
+Two things worth knowing before raising the level:
+
+- **`MaxTokens` caps thinking and answer together** on Gemini 3.x. A tight cap
+  plus a high level returns `MAX_TOKENS` with empty text — a refusal that looks
+  like silence.
+- **Thinking tokens are counted into spend** (`calculateSpend` adds them at the
+  output rate), so `max_daily_spend` measures the whole bill, not the visible half.
+
 ## Streaming
 
 ```go
