@@ -72,7 +72,11 @@ func (s *SpendTracker) checkReset() {
 // server-side at the lower rate and reports the already-discounted count
 // in promptTokenCount. Subtracting would double-count the discount.
 func calculateSpend(c Candidate, usage Usage) float64 {
-	output := float64(usage.CompletionTokens) * c.CostPerOutputToken
+	// Thinking is billed at the output rate and reported apart from the
+	// answer. Left out of this sum, a thinking model would look cheaper the
+	// harder it thought — and the spend cap would be measuring the half that
+	// grows slowest.
+	output := float64(usage.CompletionTokens+usage.ReasoningTokens) * c.CostPerOutputToken
 
 	if usage.InputBreakdown != nil {
 		b := usage.InputBreakdown

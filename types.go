@@ -22,6 +22,42 @@ type ChatRequest struct {
 	// applied" from "asked and dropped" — a caller that needs the answer to
 	// actually satisfy a schema still has to check it.
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+
+	// Reasoning asks the endpoint how much thinking to spend before it
+	// answers, and whether to hand the thinking back.
+	//
+	// Like ResponseFormat it is a request, not a guarantee, and for the same
+	// reason: the field belongs to the endpoint, and a ladder walks over
+	// endpoints that differ. Whether it reached the wire is reported on
+	// RoutingInfo.Reasoning.
+	//
+	// It is not free. On models that think, the tokens spent thinking are
+	// billed at the OUTPUT rate and counted in Usage.ReasoningTokens, and
+	// they are produced before the first byte of the answer — so the level
+	// asked for here is spent inside the caller's own attempt timeout.
+	Reasoning *ReasoningConfig `json:"reasoning,omitempty"`
+}
+
+// ReasoningConfig is the thinking budget asked of the endpoint.
+//
+// Two vendor spellings sit behind one field: Gemini 3.x takes
+// generationConfig.thinkingConfig.thinkingLevel, OpenAI-compatible endpoints
+// take reasoning_effort. Both use the same vocabulary, so the vocabulary is
+// what this type carries — adapters map it, they do not police it.
+type ReasoningConfig struct {
+	// Effort is the endpoint's own word: "minimal", "low", "medium", "high".
+	// Empty means the caller did not ask, and the model's default stands —
+	// which on Gemini 3.x is "medium", i.e. thinking is ON unless asked
+	// otherwise.
+	Effort string `json:"effort,omitempty"`
+
+	// IncludeSummary asks the endpoint to return the model's summary of its
+	// own thinking alongside the answer (Gemini: thinkingConfig.includeThoughts).
+	//
+	// It changes the SHAPE of the response — the answer stops being the
+	// whole of it — so an adapter that sets it owns separating the two.
+	// Summaries are billed like the rest of the thinking.
+	IncludeSummary bool `json:"include_summary,omitempty"`
 }
 
 // ResponseFormat is the output constraint asked of the endpoint.
@@ -107,6 +143,13 @@ type Choice struct {
 	Index        int     `json:"index"`
 	Message      Message `json:"message"`
 	FinishReason string  `json:"finish_reason"`
+
+	// ReasoningSummary is the model's account of its own thinking, present
+	// only when the caller asked for it (ChatRequest.Reasoning.IncludeSummary)
+	// AND the adapter both sent the field and could tell thinking apart from
+	// answer. It is never mixed into Message.Content — a caller that shows
+	// the answer to a user must not have to strip anything out of it.
+	ReasoningSummary string `json:"reasoning_summary,omitempty"`
 }
 
 // Usage represents token usage information.
@@ -120,6 +163,15 @@ type Usage struct {
 	// subtracted from cost calculation (providers already price cached
 	// tokens server-side; subtracting would double-count the discount).
 	CachedTokens int64 `json:"cached_tokens,omitempty"`
+
+	// ReasoningTokens is the thinking the model did before answering,
+	// reported separately from the answer (Gemini: thoughtsTokenCount).
+	//
+	// It is NOT part of CompletionTokens and it is not free: providers bill
+	// it at the output rate, which is why calculateSpend adds it there. A
+	// caller comparing PromptTokens+CompletionTokens against TotalTokens on
+	// a thinking model will find the gap here.
+	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
 
 	// InputBreakdown splits PromptTokens by modality. Nil for providers
 	// that don't report it. When non-nil, Text+Audio+Image+Video == PromptTokens.
@@ -153,6 +205,12 @@ type RoutingInfo struct {
 	//
 	// It says the request carried the constraint — not that the model obeyed.
 	StructuredOutput bool
+
+	// Reasoning reports whether the serving adapter actually put
+	// ChatRequest.Reasoning on the wire. Same contract as StructuredOutput,
+	// and it matters more: an adapter that drops the field silently leaves
+	// the model thinking at ITS default, which is the expensive end.
+	Reasoning bool
 }
 
 // StreamChunk represents a single chunk in a streaming response.

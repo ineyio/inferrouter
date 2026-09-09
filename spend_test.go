@@ -145,3 +145,18 @@ func TestCalculateSpendZeroConfig(t *testing.T) {
 		t.Errorf("got %v, want 0", got)
 	}
 }
+
+// Мышление тарифицируется по выходной ставке и приходит ОТДЕЛЬНЫМ счётчиком.
+// Не сложив его с ответом, кап расхода мерил бы ту половину, которая на
+// думающей модели растёт медленнее всех.
+func TestCalculateSpend_ReasoningTokensBillAtOutputRate(t *testing.T) {
+	c := Candidate{CostPerInputToken: 0.0000003, CostPerOutputToken: 0.0000025}
+	quiet := calculateSpend(c, Usage{PromptTokens: 1000, CompletionTokens: 100})
+	loud := calculateSpend(c, Usage{PromptTokens: 1000, CompletionTokens: 100, ReasoningTokens: 900})
+	if loud <= quiet {
+		t.Fatalf("мышление ничего не стоило: %v против %v", loud, quiet)
+	}
+	if want := quiet + 900*0.0000025; loud != want {
+		t.Errorf("расход с мышлением = %v, ожидалось %v", loud, want)
+	}
+}

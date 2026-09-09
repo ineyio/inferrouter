@@ -117,6 +117,12 @@ type geminiContent struct {
 type geminiPart struct {
 	Text       string            `json:"text,omitempty"`
 	InlineData *geminiInlineData `json:"inline_data,omitempty"`
+
+	// Thought marks a part as the model's summary of its own thinking rather
+	// than its answer. Gemini sets it only when thinkingConfig.includeThoughts
+	// was asked for, and it puts the thought parts FIRST — which is why the
+	// answer cannot be read as Parts[0].
+	Thought bool `json:"thought,omitempty"`
 }
 
 type geminiInlineData struct {
@@ -125,10 +131,26 @@ type geminiInlineData struct {
 }
 
 type geminiGenerationConfig struct {
-	Temperature     *float64 `json:"temperature,omitempty"`
-	MaxOutputTokens *int     `json:"maxOutputTokens,omitempty"`
-	TopP            *float64 `json:"topP,omitempty"`
-	StopSequences   []string `json:"stopSequences,omitempty"`
+	Temperature     *float64              `json:"temperature,omitempty"`
+	MaxOutputTokens *int                  `json:"maxOutputTokens,omitempty"`
+	TopP            *float64              `json:"topP,omitempty"`
+	StopSequences   []string              `json:"stopSequences,omitempty"`
+	ThinkingConfig  *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+// geminiThinkingConfig is the 3.x spelling of a thinking budget.
+//
+// thinkingLevel ("minimal" | "low" | "medium" | "high") replaced 2.5's
+// numeric thinkingBudget; the numeric field is still accepted for backwards
+// compatibility and is not sent here — one spelling, chosen by the model
+// family we serve.
+//
+// maxOutputTokens caps thinking AND answer together, so a low level is not
+// only cheaper: on a tight output cap it is what leaves room for an answer
+// at all.
+type geminiThinkingConfig struct {
+	ThinkingLevel   string `json:"thinkingLevel,omitempty"`
+	IncludeThoughts bool   `json:"includeThoughts,omitempty"`
 }
 
 type geminiTokenDetail struct {
@@ -139,6 +161,7 @@ type geminiTokenDetail struct {
 type geminiUsageMetadata struct {
 	PromptTokenCount        int64               `json:"promptTokenCount"`
 	CandidatesTokenCount    int64               `json:"candidatesTokenCount"`
+	ThoughtsTokenCount      int64               `json:"thoughtsTokenCount"`
 	TotalTokenCount         int64               `json:"totalTokenCount"`
 	CachedContentTokenCount int64               `json:"cachedContentTokenCount"`
 	PromptTokensDetails     []geminiTokenDetail `json:"promptTokensDetails"`
@@ -176,17 +199,16 @@ func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderR
 		return inferrouter.ProviderResponse{}, fmt.Errorf("inferrouter: empty candidates in gemini response")
 	}
 
-	content := ""
-	if len(resp.Candidates[0].Content.Parts) > 0 {
-		content = resp.Candidates[0].Content.Parts[0].Text
-	}
+	content, thought := splitParts(resp.Candidates[0].Content.Parts)
 
 	return inferrouter.ProviderResponse{
-		ID:           "",
-		Content:      content,
-		FinishReason: strings.ToLower(resp.Candidates[0].FinishReason),
-		Model:        req.Model,
-		Usage:        p.buildUsage(resp.UsageMetadata, req),
+		ID:               "",
+		Content:          content,
+		FinishReason:     strings.ToLower(resp.Candidates[0].FinishReason),
+		Model:            req.Model,
+		Usage:            p.buildUsage(resp.UsageMetadata, req),
+		ReasoningApplied: body.GenerationConfig != nil && body.GenerationConfig.ThinkingConfig != nil,
+		ReasoningSummary: thought,
 	}, nil
 }
 
@@ -206,6 +228,7 @@ func (p *Provider) buildUsage(meta geminiUsageMetadata, req inferrouter.Provider
 		CompletionTokens: meta.CandidatesTokenCount,
 		TotalTokens:      meta.TotalTokenCount,
 		CachedTokens:     meta.CachedContentTokenCount,
+		ReasoningTokens:  meta.ThoughtsTokenCount,
 	}
 
 	if len(meta.PromptTokensDetails) > 0 {
@@ -295,7 +318,51 @@ func (p *Provider) buildRequest(req inferrouter.ProviderRequest) geminiRequest {
 		}
 	}
 
+	if tc := thinkingConfig(req.Reasoning); tc != nil {
+		if gr.GenerationConfig == nil {
+			gr.GenerationConfig = &geminiGenerationConfig{}
+		}
+		gr.GenerationConfig.ThinkingConfig = tc
+	}
+
 	return gr
+}
+
+// thinkingConfig maps the router-level ask onto Gemini's spelling. Returns
+// nil when there is nothing to send — an empty ask must not become an empty
+// object on the wire, because "asked for nothing" and "asked for the
+// default" are the same request and only one of them should be reported as
+// applied.
+func thinkingConfig(r *inferrouter.ReasoningConfig) *geminiThinkingConfig {
+	if r == nil || (r.Effort == "" && !r.IncludeSummary) {
+		return nil
+	}
+	return &geminiThinkingConfig{
+		ThinkingLevel:   r.Effort,
+		IncludeThoughts: r.IncludeSummary,
+	}
+}
+
+// splitParts separates the answer from the thinking.
+//
+// Two things are being fixed here at once. Gemini returns the answer across
+// SEVERAL text parts whenever it feels like it, and the previous reader took
+// Parts[0] — silently truncating to the first fragment. And with
+// includeThoughts the thought parts come first, so that same reader would
+// have returned the thinking AS the answer.
+func splitParts(parts []geminiPart) (answer, thought string) {
+	var a, t strings.Builder
+	for _, p := range parts {
+		if p.Text == "" {
+			continue
+		}
+		if p.Thought {
+			t.WriteString(p.Text)
+			continue
+		}
+		a.WriteString(p.Text)
+	}
+	return a.String(), t.String()
 }
 
 // buildParts maps inferrouter.Message to Gemini parts. If m.Parts is empty,
@@ -489,10 +556,15 @@ func (s *geminiStream) Next() (inferrouter.StreamChunk, error) {
 		}
 
 		if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
+			// Thought parts are dropped from the delta rather than relayed:
+			// a stream goes to a reader, and the reader asked for an answer.
+			// The summary still arrives on the non-streaming path, which is
+			// where callers that want it live.
+			delta, _ := splitParts(resp.Candidates[0].Content.Parts)
 			chunk.Choices = []inferrouter.StreamDelta{
 				{
 					Index: 0,
-					Delta: inferrouter.Delta{Content: resp.Candidates[0].Content.Parts[0].Text},
+					Delta: inferrouter.Delta{Content: delta},
 				},
 			}
 			if resp.Candidates[0].FinishReason != "" {

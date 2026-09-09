@@ -98,6 +98,15 @@ type apiRequest struct {
 	// response_format key at all. A present-but-null key is a different thing
 	// to a gateway than an absent one, and older endpoints reject it.
 	ResponseFormat *inferrouter.ResponseFormat `json:"response_format,omitempty"`
+
+	// reasoning_effort is the OpenAI-side spelling of a thinking budget.
+	// Same pointer-with-omitempty reason as above: an endpoint that has
+	// never heard of the field must receive no key, not a null one.
+	//
+	// Only the effort travels. There is no portable spelling for "hand back
+	// the thinking" here — endpoints that return it do so in their own
+	// field — so IncludeSummary is not claimed and not reported.
+	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
 }
 
 type apiMessage struct {
@@ -172,6 +181,7 @@ func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderR
 		// endpoint accepted it — whether it then honoured it is not knowable
 		// from here, and is not what this field says.
 		StructuredOutputApplied: body.ResponseFormat != nil,
+		ReasoningApplied:        body.ReasoningEffort != nil,
 		Usage: inferrouter.Usage{
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
@@ -214,8 +224,20 @@ func (p *Provider) buildRequest(req inferrouter.ProviderRequest, stream bool) ap
 		Stop:        req.Stop,
 		// Passed through unchanged, schema bytes included: the caller wrote
 		// that schema and is the one who will be told whether it held.
-		ResponseFormat: req.ResponseFormat,
+		ResponseFormat:  req.ResponseFormat,
+		ReasoningEffort: reasoningEffort(req.Reasoning),
 	}
+}
+
+// reasoningEffort maps the router-level ask onto the OpenAI field, and sends
+// nothing when the caller only asked for a summary: half a request answered
+// silently is what ReasoningApplied exists to prevent.
+func reasoningEffort(r *inferrouter.ReasoningConfig) *string {
+	if r == nil || r.Effort == "" {
+		return nil
+	}
+	e := r.Effort
+	return &e
 }
 
 func (p *Provider) doRequest(ctx context.Context, auth inferrouter.Auth, body apiRequest) (*http.Response, error) {

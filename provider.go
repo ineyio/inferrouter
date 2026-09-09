@@ -51,6 +51,12 @@ type ProviderRequest struct {
 	// error that would take a whole gateway out of a ladder over a field the
 	// caller asked for as an improvement, not as a condition.
 	ResponseFormat *ResponseFormat
+
+	// Reasoning is the caller's thinking budget, or nil. Same rule as
+	// ResponseFormat: an adapter that cannot express it leaves it alone and
+	// reports ReasoningApplied false. Dropping it silently is allowed,
+	// lying about it is not.
+	Reasoning *ReasoningConfig
 }
 
 // ProviderResponse is the response from a provider adapter.
@@ -69,6 +75,16 @@ type ProviderResponse struct {
 	// it. The router copies this to RoutingInfo.StructuredOutput; nothing
 	// else may.
 	StructuredOutputApplied bool
+
+	// ReasoningApplied reports that this adapter serialised
+	// ProviderRequest.Reasoning into the request it sent. Copied by the
+	// router to RoutingInfo.Reasoning; nothing else may set it.
+	ReasoningApplied bool
+
+	// ReasoningSummary is the thinking the model reported about itself,
+	// already separated from Content by the adapter that knows the wire
+	// shape. Empty when not asked for, not returned, or not separable.
+	ReasoningSummary string
 }
 
 // ProviderStream is the interface for streaming responses.

@@ -343,6 +343,9 @@ func buildProviderRequest(c Candidate, req ChatRequest, stream, hasMedia bool) P
 		// not of the adapter type — so filtering candidates on it would mean
 		// guessing, and guessing wrong costs a working ladder step.
 		ResponseFormat: req.ResponseFormat,
+		// Same reasoning as the line above: offered to every candidate,
+		// filtered on by none.
+		Reasoning: req.Reasoning,
 	}
 }
 
@@ -436,9 +439,10 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 			ID:    resp.ID,
 			Model: resp.Model,
 			Choices: []Choice{{
-				Index:        0,
-				Message:      Message{Role: "assistant", Content: resp.Content},
-				FinishReason: resp.FinishReason,
+				Index:            0,
+				Message:          Message{Role: "assistant", Content: resp.Content},
+				FinishReason:     resp.FinishReason,
+				ReasoningSummary: resp.ReasoningSummary,
 			}},
 			Usage: resp.Usage,
 			Routing: RoutingInfo{
@@ -451,6 +455,7 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 				// the request says what was asked, and only the adapter knows
 				// what was sent.
 				StructuredOutput: resp.StructuredOutputApplied,
+				Reasoning:        resp.ReasoningApplied,
 			},
 		}, nil
 	}
