@@ -95,3 +95,23 @@ func TestInputTokenBreakdownInvariant(t *testing.T) {
 		t.Errorf("breakdown sum %d != PromptTokens %d", sum, u.PromptTokens)
 	}
 }
+
+// Roles is the carrier every conformance test walks. A test that only checked
+// membership would stay green while the list shrank, and a role quietly
+// dropped here becomes a role no adapter is asked about any more.
+func TestRolesVocabularyIsClosed(t *testing.T) {
+	want := []string{RoleSystem, RoleUser, RoleAssistant}
+	if len(Roles) != len(want) {
+		t.Fatalf("Roles has %d entries, want %d: %v", len(Roles), len(want), Roles)
+	}
+	for i, r := range want {
+		if Roles[i] != r {
+			t.Errorf("Roles[%d] = %q, want %q", i, Roles[i], r)
+		}
+	}
+	// The spellings themselves are the wire contract of every OpenAI-shaped
+	// gateway; they are not ours to rename.
+	if RoleSystem != "system" || RoleUser != "user" || RoleAssistant != "assistant" {
+		t.Errorf("role spellings changed: %q %q %q", RoleSystem, RoleUser, RoleAssistant)
+	}
+}

@@ -78,7 +78,15 @@ provider window into a 30-second outage for everyone — the amplifier behind th
 incident. Chat keeps the old behaviour: `settleFailure` is untouched, and `order_test.go` still
 pins the ladder's skip semantics.
 
-Fatal errors (`ErrAuthFailed`, `ErrInvalidRequest`) stop the loop immediately. Retryable errors (`ErrRateLimited`, `ErrProviderUnavailable`, `ErrQuotaExceeded`) try the next candidate. `ErrMultimodalUnavailable` is neither — callers are expected to catch it explicitly and degrade (e.g. strip media, retry via text alias).
+Fatal errors (`ErrAuthFailed`, `ErrUnknownAlias`) stop the loop immediately. Retryable errors (`ErrRateLimited`, `ErrProviderUnavailable`, `ErrQuotaExceeded`, `ErrRPMExceeded`, `ErrRateWindowExhausted`) try the next candidate. `ErrMultimodalUnavailable` is neither — callers are expected to catch it explicitly and degrade (e.g. strip media, retry via text alias).
+
+`ErrInvalidRequest` is neither either, and that is deliberate (changed 2026-09-04, this line caught up 2026-09-19): a 400 names the pair *(gateway, request)*, not the request alone — a reseller that dropped a model from its line-up answers "unsupported model" for a body every other step would serve. So the walk continues past it, and a body that really is malformed costs one refused call per step, bounded by the ladder. `order_test.go` pins this with the mutation that puts `ErrInvalidRequest` back into `IsFatal`.
+
+### Message roles
+
+`Message.Role` takes a value from the exported `Roles` vocabulary — `RoleSystem`, `RoleUser`, `RoleAssistant`. What every provider owes it is written on the type, and it is not uniform: `user` and `assistant` in any order, plus a **leading** run of `system`, by whatever mechanism the endpoint has for one. `openaicompat` keeps that run in the message list; `gemini` moves it to the top-level `systemInstruction` field, because `contents[].role` accepts only `USER` and `MODEL` and a system message left there is refused by Google, not down-weighted (qarap, 2026-09-19).
+
+A `system` message *after* the conversation starts is not portable, and `gemini` refuses it locally — before spending a call — rather than hoisting it to the head, which would change the prompt and report that as success. Both halves are walked over `Roles` rather than over literals: `provider/gemini/gemini_test.go:TestBuildRequestNeverEmitsSystemContentRole` and `provider/openaicompat/roles_test.go:TestBuildRequestCarriesEveryRoleVerbatim`.
 
 ### Core Interfaces (all in root package)
 

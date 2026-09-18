@@ -40,7 +40,7 @@ func TestBuildRequestRoleRemap(t *testing.T) {
 	p := New()
 	temp := 0.2
 	max := 128
-	req := p.buildRequest(ir.ProviderRequest{
+	req, err := p.buildRequest(ir.ProviderRequest{
 		Model: "gemini-2.0-flash",
 		Messages: []ir.Message{
 			{Role: "user", Content: "hi"},
@@ -51,6 +51,7 @@ func TestBuildRequestRoleRemap(t *testing.T) {
 		MaxTokens:   &max,
 		Stop:        []string{"END"},
 	})
+	require.NoError(t, err)
 	if len(req.Contents) != 3 {
 		t.Fatalf("contents len = %d", len(req.Contents))
 	}
@@ -76,9 +77,10 @@ func TestBuildRequestRoleRemap(t *testing.T) {
 
 func TestBuildRequestNoGenerationConfig(t *testing.T) {
 	p := New()
-	req := p.buildRequest(ir.ProviderRequest{
+	req, err := p.buildRequest(ir.ProviderRequest{
 		Messages: []ir.Message{{Role: "user", Content: "hi"}},
 	})
+	require.NoError(t, err)
 	if req.GenerationConfig != nil {
 		t.Errorf("generationConfig should be nil when no params set, got %+v", req.GenerationConfig)
 	}
@@ -422,4 +424,164 @@ func TestMapHTTPError_FindsRetryInfoPastOneKilobyte(t *testing.T) {
 	require.ErrorAs(t, mapHTTPError(resp), &rateLimited)
 	assert.Equal(t, 41*time.Second, rateLimited.RetryAfter)
 	assert.Len(t, rateLimited.Detail, errorDetailLimit)
+}
+
+// A leading run of system messages is the operator's frame, and Gemini keeps
+// that frame in systemInstruction. The assertion is two-sided on purpose: the
+// text must be ABSENT from contents and PRESENT in systemInstruction — "not in
+// contents" alone is also true of a body that dropped it.
+func TestBuildRequestLeadingSystemGoesToSystemInstruction(t *testing.T) {
+	p := New()
+	req, err := p.buildRequest(ir.ProviderRequest{
+		Messages: []ir.Message{
+			{Role: ir.RoleSystem, Content: "ты оператор"},
+			{Role: ir.RoleSystem, Content: "отвечай по-русски"},
+			{Role: ir.RoleUser, Content: "привет"},
+			{Role: ir.RoleAssistant, Content: "здравствуйте"},
+			{Role: ir.RoleUser, Content: "ещё"},
+		},
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, req.SystemInstruction, "the operator frame must reach systemInstruction")
+	require.Len(t, req.SystemInstruction.Parts, 2, "both leading system messages are carried")
+	assert.Equal(t, "ты оператор", req.SystemInstruction.Parts[0].Text)
+	assert.Equal(t, "отвечай по-русски", req.SystemInstruction.Parts[1].Text)
+	assert.Empty(t, req.SystemInstruction.Role, "systemInstruction has no role of its own")
+
+	require.Len(t, req.Contents, 3, "only the conversation proper goes into contents")
+	assert.Equal(t, "user", req.Contents[0].Role)
+	assert.Equal(t, "model", req.Contents[1].Role)
+	assert.Equal(t, "user", req.Contents[2].Role)
+
+	raw, err := json.Marshal(req)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"systemInstruction"`)
+	assert.NotContains(t, string(raw), `"role":"system"`)
+	assert.NotContains(t, string(raw), `"role":""`, "an empty role is a value outside the field's vocabulary")
+}
+
+// The negative half, walked over the vocabulary itself rather than over three
+// literals: whatever ir.Roles grows to, none of its values may appear as a
+// contents[] role, because that field accepts only USER and MODEL.
+func TestBuildRequestNeverEmitsSystemContentRole(t *testing.T) {
+	p := New()
+	for _, role := range ir.Roles {
+		t.Run(role, func(t *testing.T) {
+			// The role under test leads, so that the system case is accepted
+			// rather than refused, and we observe where it landed.
+			req, err := p.buildRequest(ir.ProviderRequest{
+				Messages: []ir.Message{
+					{Role: role, Content: "первое"},
+					{Role: ir.RoleUser, Content: "второе"},
+				},
+			})
+			require.NoError(t, err)
+			for i, c := range req.Contents {
+				assert.NotEqual(t, ir.RoleSystem, c.Role,
+					"contents[%d] carries a role Gemini does not accept", i)
+				assert.Contains(t, []string{"user", "model"}, c.Role,
+					"contents[%d] role = %q", i, c.Role)
+			}
+		})
+	}
+}
+
+// A system message after the conversation starts has no place in Gemini's
+// body. It is refused here rather than by Google: the assertion counts calls,
+// because "the error came back" is also true of a request that was sent and
+// rejected — which is the behaviour this change exists to remove.
+func TestChatCompletionRejectsMidDialogSystemWithoutCallingProvider(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer srv.Close()
+
+	p := New(WithBaseURL(srv.URL))
+	_, err := p.ChatCompletion(context.Background(), ir.ProviderRequest{
+		Model: "gemini-3.5-flash-lite",
+		Messages: []ir.Message{
+			{Role: ir.RoleUser, Content: "привет"},
+			{Role: ir.RoleSystem, Content: "теперь говори как пират"},
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ir.ErrInvalidRequest)
+	assert.False(t, ir.IsFatal(err), "a form refusal must not abort the ladder: the next step may carry it")
+	assert.Equal(t, 0, calls, "the refusal must cost no call")
+
+	// Same for the streaming entry point — it builds its own request.
+	_, err = p.ChatCompletionStream(context.Background(), ir.ProviderRequest{
+		Model: "gemini-3.5-flash-lite",
+		Messages: []ir.Message{
+			{Role: ir.RoleUser, Content: "привет"},
+			{Role: ir.RoleSystem, Content: "теперь говори как пират"},
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ir.ErrInvalidRequest)
+	assert.Equal(t, 0, calls, "the streaming refusal must cost no call either")
+}
+
+// The positive twin of the test above. Without it, an adapter that refused
+// every request would satisfy "zero calls" perfectly.
+func TestChatCompletionAcceptsLeadingSystemAndCallsProviderOnce(t *testing.T) {
+	calls := 0
+	var gotBody geminiRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"ок"}]},"finishReason":"STOP"}]}`))
+	}))
+	defer srv.Close()
+
+	p := New(WithBaseURL(srv.URL))
+	resp, err := p.ChatCompletion(context.Background(), ir.ProviderRequest{
+		Model: "gemini-3.5-flash-lite",
+		Messages: []ir.Message{
+			{Role: ir.RoleSystem, Content: "ты оператор"},
+			{Role: ir.RoleUser, Content: "привет"},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, "ок", resp.Content)
+	require.NotNil(t, gotBody.SystemInstruction, "the frame must survive the wire, not just buildRequest")
+	assert.Equal(t, "ты оператор", gotBody.SystemInstruction.Parts[0].Text)
+	require.Len(t, gotBody.Contents, 1)
+	assert.Equal(t, "user", gotBody.Contents[0].Role)
+}
+
+// A system instruction with nothing to instruct on is not a request. Gemini
+// answers an empty contents with a 400 of its own; this one costs no call.
+func TestBuildRequestRejectsSystemOnlyConversation(t *testing.T) {
+	p := New()
+	_, err := p.buildRequest(ir.ProviderRequest{
+		Messages: []ir.Message{{Role: ir.RoleSystem, Content: "ты оператор"}},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ir.ErrInvalidRequest)
+}
+
+// A leading system message may carry parts rather than a string: the frame is
+// built by the same buildParts as everything else, so media in it survives.
+func TestBuildRequestLeadingSystemCarriesParts(t *testing.T) {
+	p := New()
+	req, err := p.buildRequest(ir.ProviderRequest{
+		Messages: []ir.Message{
+			{Role: ir.RoleSystem, Parts: []ir.Part{
+				{Type: ir.PartText, Text: "рамка"},
+				{Type: ir.PartImage, MIMEType: "image/png", Data: []byte{1, 2, 3}},
+			}},
+			{Role: ir.RoleUser, Content: "что это?"},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, req.SystemInstruction)
+	require.Len(t, req.SystemInstruction.Parts, 2)
+	assert.Equal(t, "рамка", req.SystemInstruction.Parts[0].Text)
+	require.NotNil(t, req.SystemInstruction.Parts[1].InlineData)
+	assert.Equal(t, "image/png", req.SystemInstruction.Parts[1].InlineData.MIMEType)
 }

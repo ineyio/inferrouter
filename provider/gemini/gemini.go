@@ -105,12 +105,23 @@ func (p *Provider) SupportsMultimodal() bool { return true }
 
 // Gemini API types.
 type geminiRequest struct {
-	Contents         []geminiContent         `json:"contents"`
+	Contents []geminiContent `json:"contents"`
+
+	// SystemInstruction is where Gemini keeps the operator's frame. It is a
+	// top-level field rather than a member of contents, and contents[].role
+	// accepts only "user" and "model" — which is why a system message that
+	// rides along in contents is not weighted differently, it is refused
+	// outright (qarap, 2026-09-19).
+	SystemInstruction *geminiContent `json:"systemInstruction,omitempty"`
+
 	GenerationConfig *geminiGenerationConfig `json:"generationConfig,omitempty"`
 }
 
 type geminiContent struct {
-	Role  string       `json:"role"`
+	// Role is omitted when empty because systemInstruction reuses this type
+	// and has no role of its own: sending "role":"" there is a value outside
+	// the field's vocabulary, the same mistake in a new place.
+	Role  string       `json:"role,omitempty"`
 	Parts []geminiPart `json:"parts"`
 }
 
@@ -177,7 +188,10 @@ type geminiResponse struct {
 }
 
 func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderRequest) (inferrouter.ProviderResponse, error) {
-	body := p.buildRequest(req)
+	body, err := p.buildRequest(req)
+	if err != nil {
+		return inferrouter.ProviderResponse{}, err
+	}
 	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", p.baseURL, req.Model, req.Auth.APIKey)
 
 	httpResp, err := p.doRequest(ctx, url, body)
@@ -272,7 +286,10 @@ func (p *Provider) buildBreakdown(details []geminiTokenDetail) *inferrouter.Inpu
 }
 
 func (p *Provider) ChatCompletionStream(ctx context.Context, req inferrouter.ProviderRequest) (inferrouter.ProviderStream, error) {
-	body := p.buildRequest(req)
+	body, err := p.buildRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	url := fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse&key=%s", p.baseURL, req.Model, req.Auth.APIKey)
 
 	httpResp, err := p.doRequest(ctx, url, body)
@@ -294,11 +311,38 @@ func (p *Provider) ChatCompletionStream(ctx context.Context, req inferrouter.Pro
 	}, nil
 }
 
-func (p *Provider) buildRequest(req inferrouter.ProviderRequest) geminiRequest {
-	var contents []geminiContent
-	for _, m := range req.Messages {
+// buildRequest maps the router's messages onto Gemini's body.
+//
+// It returns an error instead of building something the endpoint will refuse,
+// and it is the single place that builds a body — both ChatCompletion and
+// ChatCompletionStream go through here, so a check placed anywhere else would
+// have a way around it.
+func (p *Provider) buildRequest(req inferrouter.ProviderRequest) (geminiRequest, error) {
+	var (
+		contents    []geminiContent
+		systemParts []geminiPart
+		started     bool // the conversation proper has begun
+	)
+
+	for i, m := range req.Messages {
+		if m.Role == inferrouter.RoleSystem {
+			if started {
+				// No position in Gemini's body means this message, and the
+				// head is not it: hoisting it there would change the prompt
+				// and call that success. Refused locally, without spending a
+				// call, and non-fatally — the steps of the ladder that do
+				// carry a mid-dialog system message still get their turn.
+				return geminiRequest{}, fmt.Errorf(
+					"inferrouter: gemini: system message at index %d must lead the conversation, gemini has no place for one after it starts: %w",
+					i, inferrouter.ErrInvalidRequest)
+			}
+			systemParts = append(systemParts, buildParts(m)...)
+			continue
+		}
+
+		started = true
 		role := m.Role
-		if role == "assistant" {
+		if role == inferrouter.RoleAssistant {
 			role = "model"
 		}
 		contents = append(contents, geminiContent{
@@ -307,7 +351,16 @@ func (p *Provider) buildRequest(req inferrouter.ProviderRequest) geminiRequest {
 		})
 	}
 
+	if len(contents) == 0 {
+		return geminiRequest{}, fmt.Errorf(
+			"inferrouter: gemini: no user or assistant message to send, a system instruction alone is not a request: %w",
+			inferrouter.ErrInvalidRequest)
+	}
+
 	gr := geminiRequest{Contents: contents}
+	if len(systemParts) > 0 {
+		gr.SystemInstruction = &geminiContent{Parts: systemParts}
+	}
 
 	if req.Temperature != nil || req.MaxTokens != nil || req.TopP != nil || len(req.Stop) > 0 {
 		gr.GenerationConfig = &geminiGenerationConfig{
@@ -325,7 +378,7 @@ func (p *Provider) buildRequest(req inferrouter.ProviderRequest) geminiRequest {
 		gr.GenerationConfig.ThinkingConfig = tc
 	}
 
-	return gr
+	return gr, nil
 }
 
 // thinkingConfig maps the router-level ask onto Gemini's spelling. Returns

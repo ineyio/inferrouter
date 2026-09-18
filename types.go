@@ -93,10 +93,49 @@ type JSONSchemaSpec struct {
 	Schema json.RawMessage `json:"schema"`
 }
 
+// Roles are the only values a Message may carry in Role. The vocabulary is
+// closed: an adapter is free to spell a role differently on its own wire
+// format, but a caller that sends anything outside this list is sending a
+// request no step of a ladder is obliged to understand.
+const (
+	// RoleSystem is the operator's frame: language, identity, rules, persona.
+	RoleSystem = "system"
+
+	// RoleUser is the caller's turn.
+	RoleUser = "user"
+
+	// RoleAssistant is the model's own previous turn.
+	RoleAssistant = "assistant"
+)
+
+// Roles is the vocabulary itself, as data. It exists so that a conformance
+// test can walk it instead of restating three literals: a role added here
+// without an adapter to carry it fails that test rather than a customer's
+// request.
+var Roles = []string{RoleSystem, RoleUser, RoleAssistant}
+
 // Message represents a chat message.
 //
 // For text-only messages, set Content. For multimodal messages (image/audio/video),
 // set Parts. If Parts is non-empty, it takes precedence over Content.
+//
+// # What every provider owes a role
+//
+// Role takes a value from Roles, and the guarantee across providers is not
+// uniform — it cannot be, because the wire formats differ on exactly this
+// point. What every provider in this library guarantees:
+//
+//   - RoleUser and RoleAssistant are carried in any order and any number.
+//   - A LEADING run of RoleSystem messages is carried, by whatever mechanism
+//     the endpoint has for one (OpenAI-shaped APIs keep it in the message
+//     list; Gemini has a separate systemInstruction field).
+//
+// A RoleSystem message that appears AFTER the conversation has started is not
+// portable. A provider that has no place for it must reject the request with
+// ErrInvalidRequest rather than guess a position for it — moving it to the
+// head would change the prompt's meaning and report that as success. Since
+// ErrInvalidRequest is not fatal (see IsFatal), such a request still reaches
+// the steps of the ladder that can serve it.
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content,omitempty"`

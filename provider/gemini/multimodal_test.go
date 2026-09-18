@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	ir "github.com/ineyio/inferrouter"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSupportsMultimodal(t *testing.T) {
@@ -79,7 +80,7 @@ func TestBuildPartsMultimodal(t *testing.T) {
 
 func TestBuildRequestWithMultimodalPart(t *testing.T) {
 	p := New()
-	req := p.buildRequest(ir.ProviderRequest{
+	req, err := p.buildRequest(ir.ProviderRequest{
 		Messages: []ir.Message{
 			{
 				Role: "user",
@@ -90,6 +91,7 @@ func TestBuildRequestWithMultimodalPart(t *testing.T) {
 			},
 		},
 	})
+	require.NoError(t, err)
 	if len(req.Contents) != 1 {
 		t.Fatalf("contents len = %d", len(req.Contents))
 	}
