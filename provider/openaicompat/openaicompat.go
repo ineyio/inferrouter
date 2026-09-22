@@ -94,6 +94,15 @@ type apiRequest struct {
 	Stream      bool         `json:"stream,omitempty"`
 	Stop        []string     `json:"stop,omitempty"`
 
+	// stream_options is the only way to be told what a streamed answer cost.
+	// Without it an OpenAI-compatible gateway ends the stream with no usage
+	// chunk at all, and every number downstream reads zero: the quota commit
+	// on Close, the spend tracker, and any cap built on them. That is not a
+	// missing metric, it is a cap that never fires — so the ask travels on
+	// every stream, and the pointer is nil on the unary path where the field
+	// has no meaning.
+	StreamOptions *apiStreamOptions `json:"stream_options,omitempty"`
+
 	// omitempty on a pointer, so a request without a format carries no
 	// response_format key at all. A present-but-null key is a different thing
 	// to a gateway than an absent one, and older endpoints reject it.
@@ -107,6 +116,13 @@ type apiRequest struct {
 	// the thinking" here — endpoints that return it do so in their own
 	// field — so IncludeSummary is not claimed and not reported.
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
+}
+
+// apiStreamOptions carries the usage ask. A struct rather than a bare bool
+// because this is the endpoint's own spelling, and the object is where the
+// OpenAI API puts any later stream-scoped flag.
+type apiStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type apiMessage struct {
@@ -222,11 +238,24 @@ func (p *Provider) buildRequest(req inferrouter.ProviderRequest, stream bool) ap
 		TopP:        req.TopP,
 		Stream:      stream,
 		Stop:        req.Stop,
+		// Only on the streaming path: on a unary call the endpoint reports
+		// usage in the body anyway, and an unasked-for key is one more thing
+		// an older gateway can refuse.
+		StreamOptions: streamOptions(stream),
 		// Passed through unchanged, schema bytes included: the caller wrote
 		// that schema and is the one who will be told whether it held.
 		ResponseFormat:  req.ResponseFormat,
 		ReasoningEffort: reasoningEffort(req.Reasoning),
 	}
+}
+
+// streamOptions asks for the usage chunk, and only when there is a stream to
+// ask about.
+func streamOptions(stream bool) *apiStreamOptions {
+	if !stream {
+		return nil
+	}
+	return &apiStreamOptions{IncludeUsage: true}
 }
 
 // reasoningEffort maps the router-level ask onto the OpenAI field, and sends

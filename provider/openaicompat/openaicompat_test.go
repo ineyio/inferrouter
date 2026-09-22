@@ -365,3 +365,109 @@ func TestChatCompletionStreamErrorStatus(t *testing.T) {
 		t.Errorf("err = %v, want ErrRateLimited", err)
 	}
 }
+
+// TestStreamRequestAsksForUsage reads the wire, not the struct: decoding the
+// body back into apiRequest would agree with a wrong json tag, which is the
+// one thing that can break here. A gateway that is never asked ends the
+// stream with no usage chunk, and the quota commit on Close writes zero.
+func TestStreamRequestAsksForUsage(t *testing.T) {
+	var raw map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	p := New("openai", srv.URL)
+	stream, err := p.ChatCompletionStream(context.Background(), ir.ProviderRequest{
+		Auth:     ir.Auth{APIKey: "k"},
+		Model:    "m",
+		Messages: []ir.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	stream.Close()
+
+	opts, ok := raw["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream_options missing or not an object: %#v", raw["stream_options"])
+	}
+	if opts["include_usage"] != true {
+		t.Errorf("include_usage = %#v, want true", opts["include_usage"])
+	}
+}
+
+// TestUnaryRequestOmitsStreamOptions is the twin of the test above: the key is
+// meaningless without a stream, and a gateway that has never heard of it must
+// receive no key rather than a null one.
+func TestUnaryRequestOmitsStreamOptions(t *testing.T) {
+	var raw map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		_, _ = w.Write([]byte(`{"id":"r1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer srv.Close()
+
+	p := New("openai", srv.URL)
+	if _, err := p.ChatCompletion(context.Background(), ir.ProviderRequest{
+		Auth:     ir.Auth{APIKey: "k"},
+		Model:    "m",
+		Messages: []ir.Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+
+	if v, present := raw["stream_options"]; present {
+		t.Errorf("unary request carries stream_options = %#v, want absent", v)
+	}
+}
+
+// TestChatCompletionStreamUsageOnlyFinalChunk exercises the shape that
+// include_usage actually produces: a trailing chunk with an EMPTY choices
+// array and usage set. The existing happy path hangs usage off a chunk that
+// also carries a delta, which is not what the flag turns on — a consumer that
+// indexes Choices[0] on every chunk passes that test and panics on this one.
+func TestChatCompletionStreamUsageOnlyFinalChunk(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	p := New("openai", srv.URL)
+	stream, err := p.ChatCompletionStream(context.Background(), ir.ProviderRequest{
+		Auth:     ir.Auth{APIKey: "k"},
+		Model:    "m",
+		Messages: []ir.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer stream.Close()
+
+	var chunks []ir.StreamChunk
+	for {
+		c, err := stream.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		chunks = append(chunks, c)
+	}
+
+	if len(chunks) != 2 {
+		t.Fatalf("got %d chunks, want 2", len(chunks))
+	}
+	if len(chunks[1].Choices) != 0 {
+		t.Errorf("final chunk choices = %+v, want empty", chunks[1].Choices)
+	}
+	if chunks[1].Usage == nil || chunks[1].Usage.TotalTokens != 5 {
+		t.Fatalf("final chunk usage = %+v, want 5 total", chunks[1].Usage)
+	}
+}
