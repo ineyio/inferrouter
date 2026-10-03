@@ -20,6 +20,13 @@ type Provider struct {
 	baseURL    string
 	httpClient *http.Client
 	models     []string
+
+	// maxCompletionTokens sends the output ceiling as max_completion_tokens.
+	// It is a property of the endpoint, not of the model: OpenAI refuses
+	// max_tokens with a 400 on every model that thinks and accepts the new
+	// spelling on every chat model, while gateways (Gonka resellers,
+	// Cerebras, Grok) speak the old one.
+	maxCompletionTokens bool
 }
 
 var _ inferrouter.Provider = (*Provider)(nil)
@@ -37,6 +44,14 @@ func WithModels(models ...string) Option {
 	return func(p *Provider) { p.models = models }
 }
 
+// WithMaxCompletionTokens sends ProviderRequest.MaxTokens as
+// max_completion_tokens instead of max_tokens. NewOpenAI and FromAccounts set
+// it for api.openai.com themselves; an endpoint elsewhere that wants the new
+// spelling opts in here.
+func WithMaxCompletionTokens() Option {
+	return func(p *Provider) { p.maxCompletionTokens = true }
+}
+
 // New creates a new OpenAI-compatible provider.
 func New(name, baseURL string, opts ...Option) *Provider {
 	p := &Provider{
@@ -50,9 +65,13 @@ func New(name, baseURL string, opts ...Option) *Provider {
 	return p
 }
 
+// openAIBaseURL is OpenAI's own endpoint. Anything served from its host takes
+// max_completion_tokens, however the provider was constructed.
+const openAIBaseURL = "https://api.openai.com/v1"
+
 // NewOpenAI creates a provider for OpenAI.
 func NewOpenAI(opts ...Option) *Provider {
-	return New("openai", "https://api.openai.com/v1", opts...)
+	return New("openai", openAIBaseURL, append([]Option{WithMaxCompletionTokens()}, opts...)...)
 }
 
 // NewGrok creates a provider for Grok/xAI.
@@ -90,9 +109,15 @@ type apiRequest struct {
 	Messages    []apiMessage `json:"messages"`
 	Temperature *float64     `json:"temperature,omitempty"`
 	MaxTokens   *int         `json:"max_tokens,omitempty"`
-	TopP        *float64     `json:"top_p,omitempty"`
-	Stream      bool         `json:"stream,omitempty"`
-	Stop        []string     `json:"stop,omitempty"`
+
+	// max_completion_tokens is the same ceiling in the spelling OpenAI
+	// requires. At most one of the two is set: which one is the endpoint's
+	// choice (Provider.maxCompletionTokens), never the caller's.
+	MaxCompletionTokens *int `json:"max_completion_tokens,omitempty"`
+
+	TopP   *float64 `json:"top_p,omitempty"`
+	Stream bool     `json:"stream,omitempty"`
+	Stop   []string `json:"stop,omitempty"`
 
 	// stream_options is the only way to be told what a streamed answer cost.
 	// Without it an OpenAI-compatible gateway ends the stream with no usage
@@ -139,11 +164,48 @@ type apiResponse struct {
 		Message      apiMessage `json:"message"`
 		FinishReason string     `json:"finish_reason"`
 	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int64 `json:"prompt_tokens"`
-		CompletionTokens int64 `json:"completion_tokens"`
-		TotalTokens      int64 `json:"total_tokens"`
-	} `json:"usage"`
+	Usage apiUsage `json:"usage"`
+}
+
+// apiUsage is the usage object, identical on the unary body and on the final
+// SSE chunk.
+type apiUsage struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+
+	// Absent on gateways that do not report it — and absent reads as zero
+	// thinking, which is what such a gateway is telling us.
+	CompletionTokensDetails *struct {
+		ReasoningTokens int64 `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details,omitempty"`
+}
+
+// toUsage maps the OpenAI accounting onto ours, and the two disagree on one
+// point: OpenAI counts thinking INSIDE completion_tokens and breaks it out in
+// completion_tokens_details, while inferrouter.Usage keeps ReasoningTokens
+// apart from CompletionTokens (Gemini's shape) and calculateSpend adds the
+// two. Copying both numbers as they come would bill the thinking twice, so
+// the thinking is moved, not copied.
+//
+// A reasoning count larger than completion_tokens cannot be a breakdown of
+// it; such an endpoint reports thinking separately already, and is taken at
+// its word rather than driven negative.
+func (u apiUsage) toUsage() inferrouter.Usage {
+	out := inferrouter.Usage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+	}
+	if u.CompletionTokensDetails == nil {
+		return out
+	}
+	r := u.CompletionTokensDetails.ReasoningTokens
+	out.ReasoningTokens = r
+	if r <= u.CompletionTokens {
+		out.CompletionTokens -= r
+	}
+	return out
 }
 
 // apiStreamChunk is a single SSE chunk.
@@ -158,11 +220,7 @@ type apiStreamChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason,omitempty"`
 	} `json:"choices"`
-	Usage *struct {
-		PromptTokens     int64 `json:"prompt_tokens"`
-		CompletionTokens int64 `json:"completion_tokens"`
-		TotalTokens      int64 `json:"total_tokens"`
-	} `json:"usage,omitempty"`
+	Usage *apiUsage `json:"usage,omitempty"`
 }
 
 func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderRequest) (inferrouter.ProviderResponse, error) {
@@ -198,11 +256,7 @@ func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderR
 		// from here, and is not what this field says.
 		StructuredOutputApplied: body.ResponseFormat != nil,
 		ReasoningApplied:        body.ReasoningEffort != nil,
-		Usage: inferrouter.Usage{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-			TotalTokens:      resp.Usage.TotalTokens,
-		},
+		Usage:                   resp.Usage.toUsage(),
 	}, nil
 }
 
@@ -230,11 +284,10 @@ func (p *Provider) buildRequest(req inferrouter.ProviderRequest, stream bool) ap
 	for i, m := range req.Messages {
 		msgs[i] = apiMessage{Role: m.Role, Content: m.Content}
 	}
-	return apiRequest{
+	body := apiRequest{
 		Model:       req.Model,
 		Messages:    msgs,
 		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
 		TopP:        req.TopP,
 		Stream:      stream,
 		Stop:        req.Stop,
@@ -247,6 +300,12 @@ func (p *Provider) buildRequest(req inferrouter.ProviderRequest, stream bool) ap
 		ResponseFormat:  req.ResponseFormat,
 		ReasoningEffort: reasoningEffort(req.Reasoning),
 	}
+	if p.maxCompletionTokens {
+		body.MaxCompletionTokens = req.MaxTokens
+	} else {
+		body.MaxTokens = req.MaxTokens
+	}
+	return body
 }
 
 // streamOptions asks for the usage chunk, and only when there is a stream to
@@ -375,11 +434,8 @@ func (s *sseStream) Next() (inferrouter.StreamChunk, error) {
 		}
 
 		if chunk.Usage != nil {
-			result.Usage = &inferrouter.Usage{
-				PromptTokens:     chunk.Usage.PromptTokens,
-				CompletionTokens: chunk.Usage.CompletionTokens,
-				TotalTokens:      chunk.Usage.TotalTokens,
-			}
+			u := chunk.Usage.toUsage()
+			result.Usage = &u
 		}
 
 		return result, nil

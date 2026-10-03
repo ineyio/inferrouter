@@ -45,7 +45,9 @@ type ChatRequest struct {
 // take reasoning_effort. Both use the same vocabulary, so the vocabulary is
 // what this type carries — adapters map it, they do not police it.
 type ReasoningConfig struct {
-	// Effort is the endpoint's own word: "minimal", "low", "medium", "high".
+	// Effort is the endpoint's own word: "minimal", "low", "medium", "high",
+	// and whatever else a given endpoint accepts ("none", "max") — it is sent
+	// verbatim, an unknown word is the endpoint's 400 to give.
 	// Empty means the caller did not ask, and the model's default stands —
 	// which on Gemini 3.x is "medium", i.e. thinking is ON unless asked
 	// otherwise.
@@ -204,7 +206,9 @@ type Usage struct {
 	CachedTokens int64 `json:"cached_tokens,omitempty"`
 
 	// ReasoningTokens is the thinking the model did before answering,
-	// reported separately from the answer (Gemini: thoughtsTokenCount).
+	// reported separately from the answer (Gemini: thoughtsTokenCount;
+	// OpenAI: completion_tokens_details.reasoning_tokens, which OpenAI counts
+	// inside completion_tokens — openaicompat moves it out, it does not copy).
 	//
 	// It is NOT part of CompletionTokens and it is not free: providers bill
 	// it at the output rate, which is why calculateSpend adds it there. A

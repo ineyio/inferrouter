@@ -2,6 +2,8 @@ package openaicompat
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/ineyio/inferrouter"
 )
@@ -49,7 +51,23 @@ func FromAccounts(accounts []inferrouter.AccountConfig, opts ...Option) ([]infer
 
 	providers := make([]inferrouter.Provider, 0, len(order))
 	for _, name := range order {
-		providers = append(providers, New(name, urls[name], opts...))
+		popts := opts
+		if isOpenAIHost(urls[name]) {
+			popts = append([]Option{WithMaxCompletionTokens()}, opts...)
+		}
+		providers = append(providers, New(name, urls[name], popts...))
 	}
 	return providers, nil
+}
+
+// isOpenAIHost reports whether a configured base URL is OpenAI's own
+// endpoint. A config account pointing there is the same endpoint as
+// NewOpenAI and must speak the same dialect — the constructor is not what
+// decides it.
+func isOpenAIHost(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Hostname(), "api.openai.com")
 }
