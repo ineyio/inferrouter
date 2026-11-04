@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ineyio/inferrouter"
 )
@@ -346,12 +348,29 @@ func (p *Provider) doRequest(ctx context.Context, auth inferrouter.Auth, body ap
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
 		// Keep the transport error in the chain: "connection refused", a DNS
-		// failure and a deadline are three different outages, and this text is
-		// the only trace of which one it was once the attempt is recorded.
-		return nil, fmt.Errorf("%w: %v", inferrouter.ErrProviderUnavailable, err)
+		// failure and a deadline are three different outages. errors.Is and
+		// errors.As reach the cause, so a caller need not read the text.
+		return nil, fmt.Errorf("%w: %w", inferrouter.ErrProviderUnavailable, err)
 	}
 
 	return resp, nil
+}
+
+// maxRetryAfter caps a delay named by a gateway: the hint comes from a third
+// party, and one that says "an hour" must not stall a caller who honours it.
+const maxRetryAfter = 60 * time.Second
+
+// retryAfter reads a Retry-After header, which RFC 9110 allows to be either a
+// count of seconds or an HTTP-date. Zero means the gateway did not say.
+func retryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	var delay time.Duration
+	if seconds, err := strconv.Atoi(value); err == nil {
+		delay = time.Duration(seconds) * time.Second
+	} else if when, err := http.ParseTime(value); err == nil {
+		delay = when.Sub(now)
+	}
+	return max(0, min(delay, maxRetryAfter))
 }
 
 func mapHTTPError(resp *http.Response) error {
@@ -372,11 +391,16 @@ func mapHTTPError(resp *http.Response) error {
 
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("%w: %s", inferrouter.ErrRateLimited, detail)
+		return &inferrouter.RateLimitedError{
+			RetryAfter: retryAfter(resp.Header.Get("Retry-After"), time.Now()),
+			Detail:     detail,
+		}
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return fmt.Errorf("%w: %s", inferrouter.ErrAuthFailed, detail)
 	case http.StatusBadRequest:
 		return fmt.Errorf("%w: %s", inferrouter.ErrInvalidRequest, detail)
+	case http.StatusNotFound:
+		return fmt.Errorf("%w: HTTP 404: %s", inferrouter.ErrModelNotFound, detail)
 	default:
 		return fmt.Errorf("%w: HTTP %d: %s", inferrouter.ErrProviderUnavailable, resp.StatusCode, detail)
 	}

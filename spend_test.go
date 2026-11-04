@@ -156,7 +156,7 @@ func TestCalculateSpend_ReasoningTokensBillAtOutputRate(t *testing.T) {
 	if loud <= quiet {
 		t.Fatalf("мышление ничего не стоило: %v против %v", loud, quiet)
 	}
-	if want := quiet + 900*0.0000025; loud != want {
+	if want := quiet + 900*0.0000025; !approxEqual(loud, want) {
 		t.Errorf("расход с мышлением = %v, ожидалось %v", loud, want)
 	}
 }

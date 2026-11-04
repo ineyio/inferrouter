@@ -83,10 +83,7 @@ func newCandidate(
 	spend *SpendTracker,
 	inflight *InflightTracker,
 ) Candidate {
-	remaining, remainErr := quotaStore.Remaining(ctx, acc.ID)
-	// Fail-open: if we can't check remaining quota, assume free if configured.
-	// Reserve() will enforce the actual limit.
-	free := acc.DailyFree > 0 && (remaining > 0 || remainErr != nil)
+	remaining, free := freeQuota(ctx, acc, quotaStore)
 
 	return Candidate{
 		Provider:               prov,
@@ -109,19 +106,23 @@ func newCandidate(
 	}
 }
 
+// freeQuota reports an account's remaining quota and whether a call on it is
+// free right now.
+//
+// Fail-open: if we can't check remaining quota, assume free if configured.
+// Reserve() will enforce the actual limit.
+func freeQuota(ctx context.Context, acc AccountConfig, quotaStore QuotaStore) (int64, bool) {
+	remaining, err := quotaStore.Remaining(ctx, acc.ID)
+	return remaining, acc.DailyFree > 0 && (remaining > 0 || err != nil)
+}
+
 // filterCandidates removes unhealthy candidates, enforces paid/spend limits,
 // and (when needMultimodal is true) drops providers that don't advertise
 // multimodal support.
 func filterCandidates(candidates []Candidate, allowPaid, needMultimodal bool) []Candidate {
 	filtered := make([]Candidate, 0, len(candidates))
 	for _, c := range candidates {
-		if c.Health == HealthUnhealthy {
-			continue
-		}
-		if !c.Free && !allowPaid {
-			continue
-		}
-		if !c.Free && c.MaxDailySpend > 0 && c.CurrentSpend >= c.MaxDailySpend {
+		if dropReason(c.Health, c.Free, allowPaid, c.MaxDailySpend, c.CurrentSpend) != DropNone {
 			continue
 		}
 		if needMultimodal && !c.Provider.SupportsMultimodal() {

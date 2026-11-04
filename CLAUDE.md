@@ -78,7 +78,7 @@ provider window into a 30-second outage for everyone — the amplifier behind th
 incident. Chat keeps the old behaviour: `settleFailure` is untouched, and `order_test.go` still
 pins the ladder's skip semantics.
 
-Fatal errors (`ErrAuthFailed`, `ErrUnknownAlias`) stop the loop immediately. Retryable errors (`ErrRateLimited`, `ErrProviderUnavailable`, `ErrQuotaExceeded`, `ErrRPMExceeded`, `ErrRateWindowExhausted`) try the next candidate. `ErrMultimodalUnavailable` is neither — callers are expected to catch it explicitly and degrade (e.g. strip media, retry via text alias).
+Fatal errors (`ErrAuthFailed`, `ErrUnknownAlias`) stop the loop immediately. Retryable errors (`ErrRateLimited`, `ErrProviderUnavailable`, `ErrModelNotFound`, `ErrQuotaExceeded`, `ErrRPMExceeded`, `ErrRateWindowExhausted`) try the next candidate. `ErrMultimodalUnavailable` is neither — callers are expected to catch it explicitly and degrade (e.g. strip media, retry via text alias).
 
 `ErrInvalidRequest` is neither either, and that is deliberate (changed 2026-09-04, this line caught up 2026-09-19): a 400 names the pair *(gateway, request)*, not the request alone — a reseller that dropped a model from its line-up answers "unsupported model" for a body every other step would serve. So the walk continues past it, and a body that really is malformed costs one refused call per step, bounded by the ladder. `order_test.go` pins this with the mutation that puts `ErrInvalidRequest` back into `IsFatal`.
 
@@ -111,6 +111,8 @@ A `system` message *after* the conversation starts is not portable, and `gemini`
 - **Cost is metadata**: an account may bill without publishing a price. Validation accepts it; only accounts with `daily_free > 0` get a local quota (no allowance means the provider enforces its own limits, not that the budget is zero). What such an account loses is spend tracking — `Router.ConfigWarnings()` returns that as data, since the library has no logger. A `max_daily_spend` with no rate can never trigger and says so there.
 - **Reservation workflow**: Reserve (with idempotency key) → Execute → Commit (actual usage) or Rollback. Prevents double-charging on retries.
 - **Circuit breaker** (`health.go`): Per-account. 3 failures in 5min → Unhealthy. After 30s → HalfOpen. Success → Healthy. On the embed path a 429 is not a failure (see above).
+- **Observing the router** (`snapshot.go`): `Router.AccountsSnapshot(ctx)` reports breaker state, spend, in-flight and `Dropped` (why a walk would skip the account). It mutates nothing: `HealthTracker.Peek` computes half-open without storing it, unlike `GetHealth`. `dropReason` is shared with `filterCandidates`, so the report cannot drift from the filter. A half-open account is not dropped: the router offers it.
+- **`openaicompat` error classes**: transport errors wrap both `ErrProviderUnavailable` and their cause (`errors.As` reaches `*net.DNSError`, `context.DeadlineExceeded`), 429 is `*RateLimitedError` with `Retry-After` capped at 60 s, 404 is `ErrModelNotFound`. None is fatal; the walk continues.
 - **Streaming** (`stream.go`): `RouterStream` wraps provider stream; commits quota on `Close()`. Uses `context.Background()` for cleanup to avoid cancelled context issues.
 - **QuotaInitializer**: If QuotaStore implements this optional interface, `NewRouter()` auto-initializes quotas from config.
 - **NoopQuotaStore/NoopMeter**: Default no-ops when not configured — allows running without quota tracking.

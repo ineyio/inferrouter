@@ -58,11 +58,57 @@ func (h *HealthTracker) GetHealth(accountID string) HealthState {
 	}
 
 	// Check if unhealthy period has elapsed → transition to half-open.
-	if ah.state == HealthUnhealthy && time.Since(ah.unhealthyAt) >= h.cfg.UnhealthyPeriod {
-		ah.state = HealthHalfOpen
-	}
+	ah.state = h.effectiveState(ah, time.Now())
 
 	return ah.state
+}
+
+// effectiveState is the one rule for half-open, shared by GetHealth, which
+// stores the transition, and Peek, which must not.
+func (h *HealthTracker) effectiveState(ah *accountHealth, now time.Time) HealthState {
+	if ah.state == HealthUnhealthy && now.Sub(ah.unhealthyAt) >= h.cfg.UnhealthyPeriod {
+		return HealthHalfOpen
+	}
+	return ah.state
+}
+
+// HealthStatus is a read-only view of one account's circuit breaker.
+type HealthStatus struct {
+	State HealthState
+
+	// FailuresInWindow counts failures still inside the failure window. The
+	// breaker does not clear them when it trips, so one failure in half-open
+	// reopens it.
+	FailuresInWindow int
+
+	// UnhealthySince is when the breaker last tripped; zero while Healthy.
+	UnhealthySince time.Time
+}
+
+// Peek reports an account's breaker without changing it. GetHealth stores the
+// transition to half-open, so an observer calling it would change what the
+// next caller sees.
+func (h *HealthTracker) Peek(accountID string) HealthStatus {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	ah, ok := h.accounts[accountID]
+	if !ok {
+		return HealthStatus{State: HealthHealthy}
+	}
+
+	now := time.Now()
+	status := HealthStatus{State: h.effectiveState(ah, now)}
+	if status.State != HealthHealthy {
+		status.UnhealthySince = ah.unhealthyAt
+	}
+	cutoff := now.Add(-h.cfg.FailureWindow)
+	for _, t := range ah.failures {
+		if t.After(cutoff) {
+			status.FailuresInWindow++
+		}
+	}
+	return status
 }
 
 // RecordSuccess records a successful request for an account.

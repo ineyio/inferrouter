@@ -176,6 +176,7 @@ func IsFatal(err error) bool {
 func IsRetryable(err error) bool {
 	return errors.Is(err, ErrRateLimited) ||
 		errors.Is(err, ErrProviderUnavailable) ||
+		errors.Is(err, ErrModelNotFound) ||
 		errors.Is(err, ErrQuotaExceeded) ||
 		errors.Is(err, ErrRPMExceeded) ||
 		errors.Is(err, ErrRateWindowExhausted)

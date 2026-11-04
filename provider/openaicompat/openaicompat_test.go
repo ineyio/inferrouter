@@ -143,6 +143,7 @@ func TestChatCompletionErrorMapping(t *testing.T) {
 		{"401", http.StatusUnauthorized, ir.ErrAuthFailed},
 		{"403", http.StatusForbidden, ir.ErrAuthFailed},
 		{"400", http.StatusBadRequest, ir.ErrInvalidRequest},
+		{"404", http.StatusNotFound, ir.ErrModelNotFound},
 		{"500", http.StatusInternalServerError, ir.ErrProviderUnavailable},
 		{"502", http.StatusBadGateway, ir.ErrProviderUnavailable},
 	}
