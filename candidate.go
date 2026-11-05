@@ -64,7 +64,9 @@ func buildCandidates(
 			if !ok {
 				continue
 			}
-			candidates = append(candidates, newCandidate(ctx, acc, prov, ref.Model, quotaStore, health, spend, inflight))
+			c := newCandidate(ctx, acc, prov, ref.Model, quotaStore, health, spend, inflight)
+			c.ExtraBody = ref.ExtraBody
+			candidates = append(candidates, c)
 		}
 	}
 

@@ -231,6 +231,69 @@ Two things worth knowing before raising the level:
 - **Thinking tokens are counted into spend** (`calculateSpend` adds them at the
   output rate), so `max_daily_spend` measures the whole bill, not the visible half.
 
+## Per-step request fields (`extra_body`)
+
+What a model and a gateway understand differs between them: on one ladder GLM may
+want `reasoning_effort: low` and DeepSeek `none`. A step can carry its own fields:
+
+```yaml
+models:
+  - alias: extract
+    models:
+      - provider: hyperfusion
+        model: gonka/zai-org/GLM-5.3-Flash
+        extra_body: {reasoning_effort: low}
+      - provider: hyperfusion
+        model: gonka/deepseek-ai/DeepSeek-V4-Flash-0731
+        extra_body:
+          reasoning_effort: none
+          chat_template_kwargs: {enable_thinking: false}
+```
+
+- **Values are not checked.** The map goes into the JSON body as is, nested fields
+  included, and an unknown field is the gateway's answer to give.
+- **The step wins** over the request on a field both set. `Routing.Reasoning` and
+  `Routing.StructuredOutput` report what actually went out, and `Routing.ExtraBody`
+  names the fields sent. These reports exist on the unary path only.
+- **Refused at startup:** `model`, `messages`, `stream`, `stream_options`,
+  `max_tokens`, `max_completion_tokens`. The ceiling has two spellings and the adapter
+  sends the one its endpoint takes.
+- **`ConfigWarnings` tells you** when a step's adapter cannot send the fields (today
+  `gemini`) or the step is an embedding one, where they have no effect. A wrapper
+  around a `Provider` must forward `SendsExtraBody`, or it is reported as unable.
+
+## Rejecting a delivered answer
+
+A 200 ends the walk, even when the answer is cut off and empty. To go on to the next
+step instead, check the answer yourself:
+
+```go
+resp, err := router.ChatCompletion(ctx, inferrouter.ChatRequest{
+    Messages: msgs,
+    ValidateResponse: func(r inferrouter.ChatResponse) error {
+        if r.Choices[0].FinishReason == "length" {
+            return errors.New("cut off")
+        }
+        return nil
+    },
+})
+```
+
+- **The tokens stay spent:** quota is committed and spend recorded, so rejecting on a
+  paid last step means paying and getting no answer.
+- **`Meter` sees** `Success: false`, `Rejected: true`, with `Usage`, `DollarCost` and an
+  `Error` wrapping `ErrResponseRejected`.
+- **The breaker is left alone.** It is per account while an unfit answer depends on the
+  model and the prompt. So a gateway that keeps returning junk stays where the ladder
+  puts it and costs an extra attempt on each call; watch `Rejected` in your meter.
+- **All steps rejected:** `RouterError` with `ErrAllFailed` and the reasons in `Tried`.
+  Rejected answers are not kept: save the raw text in the function if you need it.
+- **The function** runs inside the walk, outside the attempt budget, and its panics are
+  not recovered. `ChatCompletionStream` refuses a request that sets it.
+
+If the caller's context ends mid-walk after some attempts, the error is a `RouterError`
+with those attempts in `Tried`, and `errors.Is` still reaches the context error.
+
 ## Streaming
 
 ```go

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -93,6 +94,9 @@ func (p *Provider) Name() string { return p.name }
 // Parts into that format — advertising true would silently strip media.
 func (p *Provider) SupportsMultimodal() bool { return false }
 
+// SendsExtraBody implements inferrouter.ExtraBodySender.
+func (p *Provider) SendsExtraBody() bool { return true }
+
 func (p *Provider) SupportsModel(model string) bool {
 	if len(p.models) == 0 {
 		return true // no filter → accept all
@@ -143,6 +147,53 @@ type apiRequest struct {
 	// the thinking" here — endpoints that return it do so in their own
 	// field — so IncludeSummary is not claimed and not reported.
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
+
+	// extra is ProviderRequest.ExtraBody, laid over the fields above by wire.
+	extra map[string]any
+}
+
+// wire is the JSON sent to the endpoint: the fields above, then extra on top.
+// The fields go through json.RawMessage so that nothing already serialised is
+// reinterpreted, and without extra the bytes are json.Marshal's own.
+func (a apiRequest) wire() ([]byte, error) {
+	data, err := json.Marshal(a)
+	if err != nil || len(a.extra) == 0 {
+		return data, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	for key, value := range a.extra {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		fields[key] = raw
+	}
+	return json.Marshal(fields)
+}
+
+// applied says whether a field went out, given whether the adapter set it
+// itself: extra decides when it names the field, and a null there is not an ask.
+func (a apiRequest) applied(key string, set bool) bool {
+	if value, ok := a.extra[key]; ok {
+		return value != nil
+	}
+	return set
+}
+
+// extraNames lists the extra fields on the wire, sorted.
+func (a apiRequest) extraNames() []string {
+	if len(a.extra) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(a.extra))
+	for key := range a.extra {
+		names = append(names, key)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // apiStreamOptions carries the usage ask. A struct rather than a bare bool
@@ -256,8 +307,9 @@ func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderR
 		// "the constraint went out on the wire", and the body is the wire. The
 		// endpoint accepted it — whether it then honoured it is not knowable
 		// from here, and is not what this field says.
-		StructuredOutputApplied: body.ResponseFormat != nil,
-		ReasoningApplied:        body.ReasoningEffort != nil,
+		StructuredOutputApplied: body.applied("response_format", body.ResponseFormat != nil),
+		ReasoningApplied:        body.applied("reasoning_effort", body.ReasoningEffort != nil),
+		ExtraBodyApplied:        body.extraNames(),
 		Usage:                   resp.Usage.toUsage(),
 	}, nil
 }
@@ -301,6 +353,7 @@ func (p *Provider) buildRequest(req inferrouter.ProviderRequest, stream bool) ap
 		// that schema and is the one who will be told whether it held.
 		ResponseFormat:  req.ResponseFormat,
 		ReasoningEffort: reasoningEffort(req.Reasoning),
+		extra:           req.ExtraBody,
 	}
 	if p.maxCompletionTokens {
 		body.MaxCompletionTokens = req.MaxTokens
@@ -331,7 +384,7 @@ func reasoningEffort(r *inferrouter.ReasoningConfig) *string {
 }
 
 func (p *Provider) doRequest(ctx context.Context, auth inferrouter.Auth, body apiRequest) (*http.Response, error) {
-	jsonBody, err := json.Marshal(body)
+	jsonBody, err := body.wire()
 	if err != nil {
 		return nil, fmt.Errorf("inferrouter: marshal request: %w", err)
 	}

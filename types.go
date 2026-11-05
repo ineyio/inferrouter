@@ -36,6 +36,22 @@ type ChatRequest struct {
 	// they are produced before the first byte of the answer — so the level
 	// asked for here is spent inside the caller's own attempt timeout.
 	Reasoning *ReasoningConfig `json:"reasoning,omitempty"`
+
+	// ValidateResponse, when set, sees each delivered answer before the walk
+	// ends. A non-nil error rejects the answer: its tokens stay spent, the
+	// error becomes the reason recorded in RouterError.Tried and the walk goes
+	// on to the next step. The router has no rules of its own about what an
+	// answer must contain; a truncated one, a <think> in the text or a broken
+	// JSON is for this function to judge.
+	//
+	// It runs inside the walk, outside the attempt budget, and its panics are
+	// not recovered, so it should do no network or long work. An answer it
+	// rejected is not kept: a caller that wants the raw text saves it here.
+	//
+	// ChatCompletion only. ChatCompletionStream refuses a request that sets
+	// it, because a stream has no complete answer to check before it reaches
+	// the caller.
+	ValidateResponse func(ChatResponse) error `json:"-"`
 }
 
 // ReasoningConfig is the thinking budget asked of the endpoint.
@@ -254,6 +270,13 @@ type RoutingInfo struct {
 	// and it matters more: an adapter that drops the field silently leaves
 	// the model thinking at ITS default, which is the expensive end.
 	Reasoning bool
+
+	// ExtraBody names, sorted, the fields of the step's extra_body the serving
+	// adapter put on the wire. Names only: the values are in the config, and
+	// the step is identified by Provider and Model. Empty on an adapter that
+	// cannot send them. Like StructuredOutput and Reasoning it is reported on
+	// the unary path only.
+	ExtraBody []string
 }
 
 // StreamChunk represents a single chunk in a streaming response.

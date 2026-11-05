@@ -177,7 +177,7 @@ func NewRouter(cfg Config, providers []Provider, opts ...Option) (*Router, error
 		}
 	}
 
-	r.configWarnings = collectConfigWarnings(cfg)
+	r.configWarnings = collectConfigWarnings(cfg, provMap, embedProvMap)
 
 	// Enforce RFC §3.6 single-model invariant: aliases containing any
 	// embedding model reference must have exactly one entry. Cross-model
@@ -281,20 +281,61 @@ func (r *Router) settleFailure(ctx context.Context, c Candidate, reservation Res
 	return nil, ce
 }
 
-// settleSuccess handles quota commit, health tracking, spend recording, and metering
-// after a successful provider response.
-func (r *Router) settleSuccess(ctx context.Context, c Candidate, reservation Reservation, usage Usage, duration time.Duration) {
+// settleSpent commits the quota and records the spend of a delivered answer,
+// whatever then becomes of it.
+func (r *Router) settleSpent(ctx context.Context, c Candidate, reservation Reservation, usage Usage) (float64, error) {
 	actualTokens := usage.TotalTokens
 	if c.QuotaUnit == QuotaRequests {
 		actualTokens = 1
 	}
 	commitErr := r.quotaStore.Commit(ctx, reservation, actualTokens)
-	r.health.RecordSuccess(c.AccountID)
 
 	dollarCost := calculateSpend(c, usage)
 	if dollarCost > 0 {
 		r.spend.RecordSpend(c.AccountID, dollarCost)
 	}
+	return dollarCost, commitErr
+}
+
+// settleRejected handles an answer that was delivered and then refused by
+// ChatRequest.ValidateResponse: the tokens count as spent and the breaker is
+// left alone in both directions. It is per account while an unfit answer
+// depends on the model and the prompt, so as a failure it would take a gateway
+// away from every model; and the gateway has not earned a success, which would
+// close an open breaker and wipe its failure count.
+func (r *Router) settleRejected(ctx context.Context, c Candidate, reservation Reservation, usage Usage, reason error, duration time.Duration) CandidateError {
+	dollarCost, commitErr := r.settleSpent(ctx, c, reservation, usage)
+
+	rejected := fmt.Errorf("%w: %w", ErrResponseRejected, reason)
+	resultErr := rejected
+	if commitErr != nil {
+		resultErr = fmt.Errorf("%w (quota commit failed: %v)", rejected, commitErr)
+	}
+
+	r.meter.OnResult(ResultEvent{
+		Provider:   c.Provider.Name(),
+		AccountID:  c.AccountID,
+		Model:      c.Model,
+		Free:       c.Free,
+		Success:    false,
+		Rejected:   true,
+		Duration:   duration,
+		Usage:      usage,
+		Error:      resultErr,
+		DollarCost: dollarCost,
+	})
+
+	return CandidateError{
+		Provider: c.Provider.Name(), AccountID: c.AccountID, Model: c.Model,
+		Err: rejected,
+	}
+}
+
+// settleSuccess handles quota commit, health tracking, spend recording, and metering
+// after a successful provider response.
+func (r *Router) settleSuccess(ctx context.Context, c Candidate, reservation Reservation, usage Usage, duration time.Duration) {
+	dollarCost, commitErr := r.settleSpent(ctx, c, reservation, usage)
+	r.health.RecordSuccess(c.AccountID)
 
 	var meterErr error
 	if commitErr != nil {
@@ -346,6 +387,7 @@ func buildProviderRequest(c Candidate, req ChatRequest, stream, hasMedia bool) P
 		// Same reasoning as the line above: offered to every candidate,
 		// filtered on by none.
 		Reasoning: req.Reasoning,
+		ExtraBody: c.ExtraBody,
 	}
 }
 
@@ -362,6 +404,16 @@ func (r *Router) attemptBudget(c Candidate) time.Duration {
 		}
 	}
 	return r.cfg.AttemptTimeout
+}
+
+// walkStopped is the error of a walk the caller's context ended. Attempts
+// already made may have spent money, so their reasons are kept; errors.Is still
+// reaches the context error through RouterError.Unwrap.
+func walkStopped(err error, tried []CandidateError) error {
+	if len(tried) == 0 {
+		return err
+	}
+	return &RouterError{Err: err, Attempts: len(tried), Tried: tried}
 }
 
 func allFailedError(tried []CandidateError, total int) error {
@@ -394,7 +446,7 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		// against a provider that ignores its context it can even report a
 		// success the caller is no longer waiting for.
 		if err := ctx.Err(); err != nil {
-			return ChatResponse{}, err
+			return ChatResponse{}, walkStopped(err, tried)
 		}
 
 		reservation, skip := r.acquire(ctx, c, estimatedTokens)
@@ -433,9 +485,7 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 			continue
 		}
 
-		r.settleSuccess(ctx, c, reservation, resp.Usage, duration)
-
-		return ChatResponse{
+		chat := ChatResponse{
 			ID:    resp.ID,
 			Model: resp.Model,
 			Choices: []Choice{{
@@ -456,8 +506,19 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 				// what was sent.
 				StructuredOutput: resp.StructuredOutputApplied,
 				Reasoning:        resp.ReasoningApplied,
+				ExtraBody:        resp.ExtraBodyApplied,
 			},
-		}, nil
+		}
+
+		if req.ValidateResponse != nil {
+			if reason := req.ValidateResponse(chat); reason != nil {
+				tried = append(tried, r.settleRejected(ctx, c, reservation, resp.Usage, reason, duration))
+				continue
+			}
+		}
+
+		r.settleSuccess(ctx, c, reservation, resp.Usage, duration)
+		return chat, nil
 	}
 
 	return ChatResponse{}, allFailedError(tried, len(ordered))
@@ -465,6 +526,10 @@ func (r *Router) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 
 // ChatCompletionStream performs a streaming chat completion with automatic routing.
 func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*RouterStream, error) {
+	if req.ValidateResponse != nil {
+		return nil, fmt.Errorf("%w: ValidateResponse is not available on a stream", ErrInvalidRequest)
+	}
+
 	estimatedTokens := EstimateTokens(req.Messages)
 	hasMedia := messagesHaveMedia(req.Messages)
 
@@ -476,7 +541,7 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 	var tried []CandidateError
 	for attempt, c := range ordered {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, walkStopped(err, tried)
 		}
 
 		reservation, skip := r.acquire(ctx, c, estimatedTokens)
@@ -545,8 +610,30 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 // bill without publishing a rate — so it is not an error; it does mean spend
 // for that account cannot be measured, and anything built on that measurement
 // silently does nothing.
-func collectConfigWarnings(cfg Config) []string {
+func collectConfigWarnings(cfg Config, providers map[string]Provider, embedProviders map[string]EmbeddingProvider) []string {
 	var warnings []string
+	for _, alias := range cfg.Models {
+		for _, ref := range alias.Models {
+			if len(ref.ExtraBody) == 0 {
+				continue
+			}
+			if ep, ok := embedProviders[ref.Provider]; ok && ep.SupportsEmbeddingModel(ref.Model) {
+				warnings = append(warnings, fmt.Sprintf(
+					"alias %q, step %s/%s: extra_body has no effect on embeddings",
+					alias.Alias, ref.Provider, ref.Model))
+				continue
+			}
+			prov, ok := providers[ref.Provider]
+			if !ok {
+				continue
+			}
+			if sender, ok := prov.(ExtraBodySender); !ok || !sender.SendsExtraBody() {
+				warnings = append(warnings, fmt.Sprintf(
+					"alias %q, step %s/%s: extra_body is set but this adapter does not send it",
+					alias.Alias, ref.Provider, ref.Model))
+			}
+		}
+	}
 	for _, acc := range cfg.Accounts {
 		hasCost := acc.CostPerToken > 0 || acc.CostPerInputToken > 0 || acc.CostPerOutputToken > 0
 		if hasCost {

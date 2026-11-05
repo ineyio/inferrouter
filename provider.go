@@ -21,6 +21,17 @@ type Provider interface {
 	ChatCompletionStream(ctx context.Context, req ProviderRequest) (ProviderStream, error)
 }
 
+// ExtraBodySender is implemented by adapters that put ProviderRequest.ExtraBody
+// on the wire. A step with extra_body on an adapter without it gets a line in
+// Router.ConfigWarnings: the author of the config wrote that field for that
+// step and should hear at startup that it goes nowhere.
+//
+// A wrapper around a Provider must forward this method. A wrapper that does
+// not is reported as unable to send, which is the safe way to be wrong.
+type ExtraBodySender interface {
+	SendsExtraBody() bool
+}
+
 // Auth holds authentication credentials for a provider account.
 type Auth struct {
 	APIKey string `yaml:"api_key" json:"api_key"`
@@ -57,6 +68,11 @@ type ProviderRequest struct {
 	// reports ReasoningApplied false. Dropping it silently is allowed,
 	// lying about it is not.
 	Reasoning *ReasoningConfig
+
+	// ExtraBody is ModelRef.ExtraBody of this step, or nil. Read-only: the map
+	// is shared by every request through the step. An adapter that puts it on
+	// the wire implements ExtraBodySender and reports ExtraBodyApplied.
+	ExtraBody map[string]any
 }
 
 // ProviderResponse is the response from a provider adapter.
@@ -66,6 +82,11 @@ type ProviderResponse struct {
 	FinishReason string
 	Usage        Usage
 	Model        string
+
+	// ExtraBodyApplied names, sorted, the ProviderRequest.ExtraBody fields this
+	// adapter put into the request it sent. Copied by the router to
+	// RoutingInfo.ExtraBody.
+	ExtraBodyApplied []string
 
 	// StructuredOutputApplied reports that this adapter serialised
 	// ProviderRequest.ResponseFormat into the request it sent.

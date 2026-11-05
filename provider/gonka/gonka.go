@@ -107,6 +107,9 @@ func (p *Provider) SupportsModel(model string) bool { return p.inner.SupportsMod
 
 func (p *Provider) SupportsMultimodal() bool { return p.inner.SupportsMultimodal() }
 
+// SendsExtraBody implements inferrouter.ExtraBodySender.
+func (p *Provider) SendsExtraBody() bool { return p.inner.SendsExtraBody() }
+
 func (p *Provider) ChatCompletion(ctx context.Context, req inferrouter.ProviderRequest) (inferrouter.ProviderResponse, error) {
 	return p.inner.ChatCompletion(ctx, req)
 }

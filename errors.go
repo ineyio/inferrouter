@@ -17,7 +17,13 @@ var (
 	ErrProviderUnavailable = errors.New("inferrouter: provider unavailable")
 	ErrModelNotFound       = errors.New("inferrouter: model not found")
 	ErrAllFailed           = errors.New("inferrouter: all candidates failed")
-	ErrRPMExceeded         = errors.New("inferrouter: requests per minute limit exceeded")
+
+	// ErrResponseRejected is the error of an attempt whose delivered answer
+	// was refused by ChatRequest.ValidateResponse. The function's own error
+	// follows it in the chain. The tokens were spent, the walk goes on.
+	ErrResponseRejected = errors.New("inferrouter: response rejected")
+
+	ErrRPMExceeded = errors.New("inferrouter: requests per minute limit exceeded")
 
 	// ErrRateWindowExhausted is returned by RateLimiter.Wait when the refusal
 	// came from the hour or day window rather than the minute one. Waiting is
@@ -145,6 +151,9 @@ type RouterError struct {
 func (e *RouterError) Error() string {
 	if len(e.Tried) > 0 {
 		msg := fmt.Sprintf("inferrouter: all %d candidates failed:", e.Attempts)
+		if e.Err != nil && !errors.Is(e.Err, ErrAllFailed) {
+			msg = fmt.Sprintf("inferrouter: walk stopped after %d candidates: %v:", e.Attempts, e.Err)
+		}
 		for _, t := range e.Tried {
 			msg += fmt.Sprintf(" [%s]", t.Error())
 		}
@@ -179,5 +188,6 @@ func IsRetryable(err error) bool {
 		errors.Is(err, ErrModelNotFound) ||
 		errors.Is(err, ErrQuotaExceeded) ||
 		errors.Is(err, ErrRPMExceeded) ||
-		errors.Is(err, ErrRateWindowExhausted)
+		errors.Is(err, ErrRateWindowExhausted) ||
+		errors.Is(err, ErrResponseRejected)
 }

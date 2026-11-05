@@ -23,11 +23,19 @@ type RouteEvent struct {
 
 // ResultEvent describes the outcome of a provider call.
 type ResultEvent struct {
-	Provider   string
-	AccountID  string
-	Model      string
-	Free       bool
-	Success    bool
+	Provider  string
+	AccountID string
+	Model     string
+	Free      bool
+	Success   bool
+
+	// Rejected marks an answer that was delivered and then refused by
+	// ChatRequest.ValidateResponse. Success is false, so a meter that does not
+	// know this field reads a failure rather than crediting the gateway. Unlike
+	// other failures it carries Usage and DollarCost, because the tokens were
+	// spent, and Error wraps ErrResponseRejected.
+	Rejected bool
+
 	Duration   time.Duration
 	Usage      Usage
 	Error      error

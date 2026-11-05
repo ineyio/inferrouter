@@ -61,13 +61,24 @@ func (m *LogMeter) OnResult(e inferrouter.ResultEvent) {
 		}
 		m.Logger.Info("result", attrs...)
 	} else {
-		m.Logger.Warn("result_error",
+		attrs := []any{
 			"provider", e.Provider,
 			"account", e.AccountID,
 			"model", e.Model,
 			"free", e.Free,
 			"duration_ms", e.Duration.Milliseconds(),
 			"error", e.Error,
-		)
+		}
+		// Only a rejected answer spent tokens on a failed attempt, and other
+		// failures keep their log shape for existing parsers.
+		if e.Rejected {
+			attrs = append(attrs,
+				"rejected", true,
+				"prompt_tokens", e.Usage.PromptTokens,
+				"completion_tokens", e.Usage.CompletionTokens,
+				"dollar_cost", e.DollarCost,
+			)
+		}
+		m.Logger.Warn("result_error", attrs...)
 	}
 }

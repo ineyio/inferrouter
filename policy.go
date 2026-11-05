@@ -13,7 +13,13 @@ type Candidate struct {
 	Auth      Auth
 	Model     string
 	Free      bool
-	Remaining int64     // remaining quota (tokens or requests)
+	Remaining int64 // remaining quota (tokens or requests)
+
+	// ExtraBody is ModelRef.ExtraBody of the step this candidate came from. It
+	// travels on the candidate so that a policy reordering the walk cannot
+	// hand one step's fields to another.
+	ExtraBody map[string]any
+
 	QuotaUnit QuotaUnit // unit of the quota
 	Health    HealthState
 

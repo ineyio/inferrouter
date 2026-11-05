@@ -504,3 +504,10 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
+
+// gonka composes openaicompat, so it sends extra_body, and a ladder of signed
+// endpoints must not get a false warning at startup.
+func TestSendsExtraBody(t *testing.T) {
+	var sender ir.ExtraBodySender = newTestProvider(t, "http://127.0.0.1:1")
+	assert.True(t, sender.SendsExtraBody())
+}

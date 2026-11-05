@@ -1,6 +1,7 @@
 package inferrouter
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"time"
@@ -33,6 +34,40 @@ type ModelMapping struct {
 type ModelRef struct {
 	Provider string `yaml:"provider"`
 	Model    string `yaml:"model"`
+
+	// ExtraBody is laid over the JSON body of every chat request this step
+	// sends, nested fields included. Values are not checked: which fields a
+	// model and a gateway understand differs between them and changes, so an
+	// unknown field is the gateway's answer to give, as with
+	// ReasoningConfig.Effort. On a field the adapter also sets, the step wins.
+	//
+	// The keys in reservedExtraBodyKeys are refused by Validate. The map is
+	// read concurrently by every request and must not be changed after
+	// NewRouter. It has no effect on embeddings.
+	ExtraBody map[string]any `yaml:"extra_body,omitempty"`
+}
+
+// reservedExtraBodyKeys cannot be set per step. The envelope decides how the
+// answer is parsed. The output ceiling has two spellings and the adapter sends
+// exactly the one its endpoint takes (openaicompat.WithMaxCompletionTokens), so
+// a step setting the other would put both on the wire.
+var reservedExtraBodyKeys = []string{
+	"model", "messages", "stream", "stream_options",
+	"max_tokens", "max_completion_tokens",
+}
+
+func validateExtraBody(extra map[string]any) error {
+	for _, key := range reservedExtraBodyKeys {
+		if _, ok := extra[key]; ok {
+			return fmt.Errorf("%q is reserved", key)
+		}
+	}
+	// Refused here rather than on every request: a YAML .nan would otherwise
+	// fail each call to this step at marshal time.
+	if _, err := json.Marshal(extra); err != nil {
+		return err
+	}
+	return nil
 }
 
 // AccountConfig configures a single provider account.
@@ -187,6 +222,11 @@ func (c Config) Validate() error {
 		}
 		if len(m.Models) == 0 {
 			return fmt.Errorf("inferrouter: config: models[%d] (%s): at least one model ref is required", i, m.Alias)
+		}
+		for j, ref := range m.Models {
+			if err := validateExtraBody(ref.ExtraBody); err != nil {
+				return fmt.Errorf("inferrouter: config: models[%d] (%s): step %d: extra_body: %w", i, m.Alias, j, err)
+			}
 		}
 	}
 

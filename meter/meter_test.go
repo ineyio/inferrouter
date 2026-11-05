@@ -224,3 +224,31 @@ func TestLogMeterOnResultErrorFields(t *testing.T) {
 		}
 	}
 }
+
+func TestLogMeterRejectedShowsWhatItCost(t *testing.T) {
+	var buf bytes.Buffer
+	m := &LogMeter{Logger: slog.New(slog.NewTextHandler(&buf, nil))}
+
+	m.OnResult(ir.ResultEvent{Provider: "p", Rejected: true, Error: errors.New("cut off"),
+		Usage: ir.Usage{PromptTokens: 7, CompletionTokens: 9}, DollarCost: 0.5})
+
+	out := buf.String()
+	for _, want := range []string{"level=WARN", "rejected=true", "prompt_tokens=7", "completion_tokens=9", "dollar_cost=0.5", "cut off"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestLogMeterFailureKeepsItsShape(t *testing.T) {
+	var buf bytes.Buffer
+	m := &LogMeter{Logger: slog.New(slog.NewTextHandler(&buf, nil))}
+
+	m.OnResult(ir.ResultEvent{Provider: "p", Error: errors.New("down")})
+
+	for _, absent := range []string{"rejected", "prompt_tokens", "dollar_cost"} {
+		if strings.Contains(buf.String(), absent) {
+			t.Errorf("%q in an ordinary failure:\n%s", absent, buf.String())
+		}
+	}
+}
