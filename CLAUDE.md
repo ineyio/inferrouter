@@ -135,7 +135,7 @@ Three products pin this library, each by pseudo-version in its own `go.mod`. Thi
 |---|---|---|---|
 | qarap | `a888887` | everything below | — |
 | graph | `5bafa8b` | error classes and snapshot (C.23 Ф2+Ф4), per-step fields and answer rejection (C.46) | the caller's end outside the breaker (C.47, RISK-177) |
-| iney engine | `855f169` | error classes and snapshot (C.23 Ф2+Ф4) | C.46, C.47 (RISK-177); raise deliberately held until graph's Lincoln run ends |
+| iney engine | `a888887` (main `4ef7320`, raised 2026-11-07; prod runs `855f169` until the next deploy) | everything below | — |
 
 Releases in this window: `855f169` C.23 Ф2+Ф4 → `5bafa8b` C.46 → `a888887` C.47.
 
