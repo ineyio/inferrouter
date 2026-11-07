@@ -127,6 +127,20 @@ YAML with `${ENV_VAR}` expansion. Defines accounts (provider, auth, daily free q
 
 **Gateway pools**: `AccountConfig.BaseURL` (`base_url` in YAML) declares an OpenAI-compatible endpoint per account; `openaicompat.FromAccounts(cfg.Accounts)` builds one provider per distinct provider name from those entries — a pool of gateways (e.g. Gonka resellers like GonkaGate) is pure config, no code per gateway. By default the pool is walked in declaration order; add `policy.LeastBusyPolicy` when the gateways really are interchangeable and you want concurrent requests spread across them instead of funnelling into the first. In-flight counts are process-local and best-effort: a simultaneous burst may cluster its first wave before any counter increments. See `examples/gateway-pool/`.
 
+## Consumers and pins
+
+Three products pin this library, each by pseudo-version in its own `go.mod`. This table is the only place that shows all three; update it with every release and every pin raise.
+
+| Consumer | Pin (2026-11-07) | Has | Lacks |
+|---|---|---|---|
+| qarap | `a888887` | everything below | — |
+| graph | `5bafa8b` | error classes and snapshot (C.23 Ф2+Ф4), per-step fields and answer rejection (C.46) | the caller's end outside the breaker (C.47, RISK-177) |
+| iney engine | `855f169` | error classes and snapshot (C.23 Ф2+Ф4) | C.46, C.47 (RISK-177); raise deliberately held until graph's Lincoln run ends |
+
+Releases in this window: `855f169` C.23 Ф2+Ф4 → `5bafa8b` C.46 → `a888887` C.47.
+
+**Release rule.** The "ready" letter for a release names, for each consumer, whether it should raise its pin and by when. Check a consumer's pin: `grep inferrouter <repo>/go.mod`. The pin in `go.mod` on main is not proof of what runs in production; each product's own prod-version reading is.
+
 ## Conventions
 
 - Go 1.23+, standard library preferred, minimal dependencies
