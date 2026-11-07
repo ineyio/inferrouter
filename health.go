@@ -1,6 +1,8 @@
 package inferrouter
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -109,6 +111,29 @@ func (h *HealthTracker) Peek(accountID string) HealthStatus {
 		}
 	}
 	return status
+}
+
+// callerEndSaysNothing reports whether an attempt, finished while the caller's
+// context was in the state callerErr, must be left out of the breaker in both
+// directions. The caller going away says nothing about the gateway. Its deadline
+// says as little when the attempt has a budget of its own, which is what shows a
+// hung gateway; with attemptBudget zero nothing else would ever see the hang, so
+// the deadline counts.
+//
+// The price: while a gateway hangs, a caller whose deadline is shorter than the
+// attempt budget waits it out in full until longer calls open the breaker.
+//
+// It is the caller's context that decides, never the error of the attempt: a
+// stream's watchdog ends a hung opening with context.Canceled too.
+func callerEndSaysNothing(callerErr error, attemptBudget time.Duration) bool {
+	switch {
+	case errors.Is(callerErr, context.Canceled):
+		return true
+	case errors.Is(callerErr, context.DeadlineExceeded):
+		return attemptBudget > 0
+	default:
+		return false
+	}
 }
 
 // RecordSuccess records a successful request for an account.

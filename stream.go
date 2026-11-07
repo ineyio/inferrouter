@@ -28,6 +28,18 @@ type RouterStream struct {
 	// held for the life of the stream and called on Close — cancelling it any
 	// earlier would tear down the response body mid-generation.
 	cancel context.CancelFunc
+
+	// caller and budget decide what the end of the stream says about the gateway
+	// (callerEndSaysNothing). The attempt budget stopped running at opening, but
+	// the rule is the same: a long answer on a short deadline is a healthy gateway.
+	caller context.Context
+	budget time.Duration
+
+	// callerErrAtEnd is the caller's state when Next first failed. It is read
+	// there, not in Close, for two reasons: an answer read to its end stays a
+	// success if the caller goes away afterwards, and an adapter may report a
+	// read broken by the caller as io.EOF (openaicompat and gemini do).
+	callerErrAtEnd error
 }
 
 // Routing reports which step of the ladder opened this stream. The unary path
@@ -49,6 +61,7 @@ func (s *RouterStream) Next() (StreamChunk, error) {
 	if err != nil {
 		if s.streamErr == nil {
 			s.streamErr = err
+			s.callerErrAtEnd = s.caller.Err()
 		}
 		return chunk, err
 	}
@@ -89,9 +102,19 @@ func (s *RouterStream) Close() error {
 			actualTokens = 1
 		}
 		quotaErr = s.quotaStore.Commit(context.Background(), s.reservation, actualTokens)
-		s.health.RecordSuccess(s.candidate.AccountID)
 	} else {
 		quotaErr = s.quotaStore.Rollback(context.Background(), s.reservation)
+	}
+
+	callerErr := s.callerErrAtEnd
+	if s.streamErr == nil {
+		callerErr = s.caller.Err() // closed without reading to the end
+	}
+	switch {
+	case callerEndSaysNothing(callerErr, s.budget):
+	case isSuccess && callerErr == nil:
+		s.health.RecordSuccess(s.candidate.AccountID)
+	default:
 		s.health.RecordFailure(s.candidate.AccountID)
 	}
 

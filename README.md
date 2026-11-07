@@ -194,6 +194,22 @@ accounts:
 
 On the streaming path the budget covers opening the stream. Once the first chunk is on its way the generation runs on the caller's deadline alone — a slow answer from a healthy step is not a reason to move on.
 
+### When the caller's context ends
+
+The end of the caller's context says nothing about the gateway, so the circuit breaker does not count that attempt as a failure or as a success.
+
+| The caller's context at the end of the attempt | Attempt budget set | No attempt budget |
+|---|---|---|
+| canceled | not counted | not counted |
+| deadline exceeded | not counted | counted |
+| alive | counted | counted |
+
+Without a budget nothing else would ever see a hang, so there the deadline counts. The embedding path has no attempt budget at all, whatever the configuration says. It is the caller's context that decides, not the error of the attempt, so an attempt's own timeout and a stream's watchdog always count.
+
+The price: while a gateway hangs, a caller whose deadline is shorter than the attempt budget waits it out in full until longer calls open the breaker. After a stream has opened the budget no longer runs, so a stream that hangs mid-answer is not seen at all when a budget is set. An answer read to its end stays a success if the caller goes away afterwards.
+
+An attempt left out of the breaker is still reported to the `Meter` and listed in `Tried`. `Commit` and `Rollback` outlive the caller's context, keep its values, and have their own bound of 5 seconds.
+
 ## Thinking (reasoning effort)
 
 Models that think do it by default — Gemini 3.x sits at `medium` unless asked

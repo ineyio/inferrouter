@@ -114,14 +114,19 @@ func (r *Router) acquireEmbed(ctx context.Context, c EmbedCandidate, estimatedTo
 // settleEmbedFailure handles rollback, health tracking, and metering after
 // an embedding provider error. Symmetric to settleFailure for chat.
 func (r *Router) settleEmbedFailure(ctx context.Context, c EmbedCandidate, reservation Reservation, providerErr error, duration time.Duration, attempt int) (*RouterError, CandidateError) {
-	rollbackErr := r.quotaStore.Rollback(ctx, reservation)
+	settleCtx, release := settleContext(ctx)
+	defer release()
+	rollbackErr := r.quotaStore.Rollback(settleCtx, reservation)
 
 	// A 429 is backpressure, not ill health: the account is answering, and
 	// answering correctly. Counting it as a failure trips the breaker after
 	// three of them, and with a single embedding account that turns a
 	// seconds-long provider window into a 30-second outage for every caller —
 	// the same amplifier that killed 187 requests in the gonka incident.
-	if !errors.Is(providerErr, ErrRateLimited) {
+	//
+	// The budget is zero whatever the configuration says: attempt_timeout does
+	// not run on this path, so the caller's deadline is the only sign of a hang.
+	if !errors.Is(providerErr, ErrRateLimited) && !callerEndSaysNothing(ctx.Err(), 0) {
 		r.health.RecordFailure(c.AccountID)
 	}
 
@@ -164,7 +169,9 @@ func (r *Router) settleEmbedSuccess(ctx context.Context, c EmbedCandidate, reser
 	if c.QuotaUnit == QuotaRequests {
 		actualTokens = 1
 	}
-	commitErr := r.quotaStore.Commit(ctx, reservation, actualTokens)
+	settleCtx, release := settleContext(ctx)
+	defer release()
+	commitErr := r.quotaStore.Commit(settleCtx, reservation, actualTokens)
 	r.health.RecordSuccess(c.AccountID)
 
 	dollarCost := float64(usage.InputTokens) * c.Cost

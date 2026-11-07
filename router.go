@@ -241,12 +241,27 @@ func (r *Router) acquire(ctx context.Context, c Candidate, estimatedTokens int64
 	return reservation, nil
 }
 
+// settleTimeout bounds one Commit or Rollback once the attempt is over: the
+// caller's deadline no longer does, and a hung store must not hold the caller.
+const settleTimeout = 5 * time.Second
+
+// settleContext is the context of an attempt's accounting. It outlives the
+// caller, since a reservation left behind by a caller who went away would stay
+// reserved, and keeps the caller's values.
+func settleContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+}
+
 // settleFailure handles rollback, health tracking, and metering after a provider error.
 // Returns a RouterError if the error is fatal (caller should return immediately),
 // or a CandidateError to append to the tried list.
 func (r *Router) settleFailure(ctx context.Context, c Candidate, reservation Reservation, providerErr error, duration time.Duration, attempt int) (*RouterError, CandidateError) {
-	rollbackErr := r.quotaStore.Rollback(ctx, reservation)
-	r.health.RecordFailure(c.AccountID)
+	settleCtx, release := settleContext(ctx)
+	defer release()
+	rollbackErr := r.quotaStore.Rollback(settleCtx, reservation)
+	if !callerEndSaysNothing(ctx.Err(), r.attemptBudget(c)) {
+		r.health.RecordFailure(c.AccountID)
+	}
 
 	resultErr := providerErr
 	if rollbackErr != nil {
@@ -288,7 +303,9 @@ func (r *Router) settleSpent(ctx context.Context, c Candidate, reservation Reser
 	if c.QuotaUnit == QuotaRequests {
 		actualTokens = 1
 	}
-	commitErr := r.quotaStore.Commit(ctx, reservation, actualTokens)
+	settleCtx, release := settleContext(ctx)
+	defer release()
+	commitErr := r.quotaStore.Commit(settleCtx, reservation, actualTokens)
 
 	dollarCost := calculateSpend(c, usage)
 	if dollarCost > 0 {
@@ -598,6 +615,8 @@ func (r *Router) ChatCompletionStream(ctx context.Context, req ChatRequest) (*Ro
 			candidate:   c,
 			attempts:    attempt + 1,
 			cancel:      cancel,
+			caller:      ctx,
+			budget:      r.attemptBudget(c),
 			startTime:   time.Now(),
 		}, nil
 	}
